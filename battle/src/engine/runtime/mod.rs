@@ -236,6 +236,7 @@ impl BattleRuntime {
             .conduit
             .selections()
             .into_iter()
+            .filter(|(uid, _)| self.managers.entity.team_type(*uid) == Some(1))
             .map(|(uid, index)| sonettobuf::FightDeviceOper {
                 uid: Some(uid),
                 index: Some(index),

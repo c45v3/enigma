@@ -142,6 +142,131 @@ fn auto_round_keeps_the_selected_enemy_for_all_queued_attacks() {
 }
 
 #[test]
+fn auto_round_returns_only_attacker_conduit_operations() {
+    crate::test_support::init_config();
+    let entity = |uid, team_type| FightEntityInfo {
+        uid: Some(uid),
+        model_id: Some(3149),
+        team_type: Some(team_type),
+        position: Some(if team_type == 1 { 1 } else { -1 }),
+        current_hp: Some(100_000),
+        attr: Some(HeroAttribute {
+            hp: Some(100_000),
+            attack: Some(1_000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let fight = Fight {
+        version: Some(7),
+        attacker: Some(FightTeam {
+            entitys: vec![
+                entity(10, 1),
+                team_hero(11, 3023, 100_000, [30230111, 30230121]),
+            ],
+            device_area: Some(sonettobuf::FightDeviceAreaInfo::default()),
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![entity(-1, 2)],
+            device_area: Some(sonettobuf::FightDeviceAreaInfo::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut runtime = runtime(fight);
+    runtime
+        .managers
+        .execute_card(CardCommand::Setup(CardSetup {
+            hand: vec![
+                CardInfo {
+                    uid: Some(11),
+                    skill_id: Some(30230111),
+                    temp_card: Some(false),
+                    ..Default::default()
+                },
+                CardInfo {
+                    uid: Some(11),
+                    skill_id: Some(30230121),
+                    temp_card: Some(false),
+                    ..Default::default()
+                },
+            ],
+            draw_pile: Vec::new(),
+            deck_num: 1,
+        }))
+        .unwrap();
+    runtime.round_state.act_point = 1;
+    let original_hand = runtime.card_hand().to_vec();
+
+    let reply = runtime.plan_auto_round(&AutoRoundRequest::default());
+
+    assert_eq!(
+        reply.devices_opers,
+        vec![sonettobuf::FightDeviceOper {
+            uid: Some(10),
+            index: Some(1),
+        }]
+    );
+    assert_eq!(runtime.card_hand(), original_hand);
+
+    let round = runtime
+        .advance_round(BeginRoundRequest {
+            opers: reply.opers,
+            auto_oper: Some(true),
+            devices_opers: reply.devices_opers,
+        })
+        .unwrap();
+    let mut effects = Vec::new();
+    fn collect_effects<'a>(
+        step: &'a sonettobuf::FightStep,
+        effects: &mut Vec<&'a sonettobuf::ActEffect>,
+    ) {
+        for effect in &step.act_effect {
+            effects.push(effect);
+            if let Some(nested) = effect.fight_step.as_ref() {
+                collect_effects(nested, effects);
+            }
+        }
+    }
+    for step in &round.fight_step {
+        collect_effects(step, &mut effects);
+    }
+
+    let mut device_steps = Vec::new();
+    fn collect_device_steps<'a>(
+        step: &'a sonettobuf::FightStep,
+        device_steps: &mut Vec<&'a sonettobuf::FightStep>,
+    ) {
+        if step.act_type == Some(sonettobuf::fight_step::ActType::Device as i32) {
+            device_steps.push(step);
+        }
+        for effect in &step.act_effect {
+            if let Some(nested) = effect.fight_step.as_ref() {
+                collect_device_steps(nested, device_steps);
+            }
+        }
+    }
+    for step in &round.fight_step {
+        collect_device_steps(step, &mut device_steps);
+    }
+    assert!(
+        !device_steps.is_empty(),
+        "automatic round must project the attacker's device action"
+    );
+    assert!(
+        effects.iter().any(|effect| {
+            effect.effect_type == Some(sonettobuf::effect_type_enum::EffectType::Usecards as i32)
+                && effect
+                    .card_info_list
+                    .iter()
+                    .any(|card| card.skill_id == Some(30230111))
+        }),
+        "automatic round must retain the player's card data"
+    );
+}
+
+#[test]
 fn auto_round_honors_existing_operations_without_echoing_them() {
     let mut runtime = auto_runtime();
     let request = AutoRoundRequest {
