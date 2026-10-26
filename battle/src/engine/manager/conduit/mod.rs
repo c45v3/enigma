@@ -156,6 +156,8 @@ pub struct ConduitCounterChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConduitChange {
     Initialized(ConduitArea),
+    /// Re-sends the authoritative area without changing manager state.
+    StateSynchronized(ConduitArea),
     RosterRefreshed(ConduitArea),
     GroupSelected {
         source_uid: i64,
@@ -301,6 +303,13 @@ impl ConduitManager {
             .filter(|(team, _)| !self.initialized.contains(team))
             .map(|(team, _)| ConduitCommand::Initialize { team: *team })
             .collect()
+    }
+
+    pub fn state_snapshots(&self) -> impl Iterator<Item = ConduitChange> + '_ {
+        self.areas
+            .iter()
+            .filter(|(team, _)| self.initialized.contains(team))
+            .map(|(_, area)| ConduitChange::StateSynchronized(area.clone()))
     }
 
     pub fn terminal_roster_refresh_commands(&self, defeated_uids: &[i64]) -> Vec<ConduitCommand> {

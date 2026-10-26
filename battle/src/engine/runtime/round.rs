@@ -89,7 +89,7 @@ fn advance_wave_transition(
     let pool =
         crate::engine::skill::target::TargetPool::from_fight_with_catalog(battle_catalog, fight);
     let steps = project_result(
-        schedule::run_wave_entry(change).map_err(|error| format!("{error:?}"))?,
+        schedule::run_wave_entry(&managers.conduit, change).map_err(|error| format!("{error:?}"))?,
         fight_version,
         absorb_hurt_map_layout,
     )?;

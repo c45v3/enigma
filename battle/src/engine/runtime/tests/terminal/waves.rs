@@ -539,3 +539,135 @@ fn round_start_clear_advances_the_configured_wave() {
         })
     }));
 }
+
+#[test]
+fn conduit_state_is_reemitted_after_wave_transition() {
+    crate::test_support::init_config();
+    let remaining = player_card(30230111);
+    let (mut runtime, dealt) = wave_clear_runtime(vec![
+        remaining.clone(),
+        player_card(30230111),
+        player_card(30230121),
+    ]);
+    let attacker = runtime.fight.attacker.as_mut().unwrap();
+    let device = attacker.entitys.first_mut().unwrap();
+    device.model_id = Some(3149);
+    device.skill_group1 = vec![31490111, 31490112, 31490113];
+    device.skill_group2 = vec![31490121, 31490122, 31490123];
+    runtime.managers.conduit =
+        crate::engine::manager::conduit::ConduitManager::seed(&runtime.fight);
+    let init = runtime.managers.conduit.initialization_commands();
+    assert_eq!(init.len(), 1);
+    runtime.managers.conduit.execute(init[0].clone()).unwrap();
+    runtime
+        .managers
+        .conduit
+        .execute(
+            crate::engine::manager::conduit::ConduitCommand::SelectGroup {
+                source_uid: 10,
+                group: 2,
+            },
+        )
+        .unwrap();
+    runtime
+        .managers
+        .conduit
+        .execute(
+            crate::engine::manager::conduit::ConduitCommand::ChangePower(
+                crate::engine::manager::conduit::ConduitPowerChange {
+                    origin: crate::engine::skill::rule::CommandOrigin {
+                        domain: crate::engine::skill::rule::RuleDomain::Lifecycle,
+                        key: crate::engine::skill::rule::DefinitionKey::new(0, "test"),
+                    },
+                    source_uid: 10,
+                    team: 1,
+                    power_id: 1,
+                    delta: 7,
+                    kind: crate::engine::manager::conduit::ConduitPowerChangeKind::Standard,
+                },
+            ),
+        )
+        .unwrap();
+
+    let ai_choices = runtime
+        .fight
+        .defender
+        .as_ref()
+        .unwrap()
+        .entitys
+        .iter()
+        .map(
+            |entity| crate::engine::runtime::determinism::AiSkillChoice {
+                source_uid: entity.uid.unwrap(),
+                skill_id: entity.skill_group1[0],
+                target_uid: 10,
+            },
+        )
+        .collect::<Vec<_>>();
+    seed_ai_turn(&mut runtime, ai_choices);
+    let round = runtime
+        .build_begin_round_from_schedule(&BeginRoundRequest {
+            opers: vec![
+                BeginRoundOper {
+                    oper_type: Some(crate::engine::manager::card::CardOpType::PlayCard.id()),
+                    param1: Some(2),
+                    to_id: Some(-1),
+                    ..Default::default()
+                },
+                BeginRoundOper {
+                    oper_type: Some(crate::engine::manager::card::CardOpType::PlayCard.id()),
+                    param1: Some(2),
+                    to_id: Some(-2),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+    let effects = round
+        .fight_step
+        .iter()
+        .flat_map(|step| step.act_effect.iter())
+        .collect::<Vec<_>>();
+    let wave = effects
+        .iter()
+        .position(|effect| {
+            effect.effect_type
+                == Some(sonettobuf::effect_type_enum::EffectType::Newchangewave as i32)
+        })
+        .unwrap();
+    let init = effects
+        .iter()
+        .position(|effect| {
+            effect.effect_type == Some(sonettobuf::effect_type_enum::EffectType::Initdevice as i32)
+        })
+        .unwrap();
+    assert!(wave < init);
+    assert_eq!(effects[init].team_type, Some(1));
+    let area = effects[init].device_area_info.as_ref().unwrap();
+    assert_eq!(area.devices.len(), 1);
+    assert_eq!(area.devices[0].uid, Some(10));
+    assert_eq!(area.devices[0].index, Some(2));
+    assert_eq!(
+        area.devices[0]
+            .skills
+            .iter()
+            .map(|group| group
+                .skills
+                .iter()
+                .map(|skill| skill.skill_id)
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![Some(31490111), Some(31490121)],
+            vec![Some(31490131), Some(31490141)],
+            vec![Some(31490151)],
+        ]
+    );
+    assert_eq!(area.powers[0].id, Some(1));
+    assert_eq!(area.powers[0].power, Some(7));
+    assert_eq!(runtime.managers.conduit.selected_group(10), Some(2));
+    assert_eq!(runtime.fight.cur_wave, Some(2));
+    assert_eq!(round.before_cards2, vec![remaining]);
+    assert_eq!(round.team_a_cards2, dealt);
+}

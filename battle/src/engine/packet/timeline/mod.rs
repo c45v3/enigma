@@ -743,8 +743,11 @@ fn project_change(
         BattleChange::NuoDiKa(change) => vec![EffectPacket::nuo_di_ka_channel(*change)],
         BattleChange::Conduit(crate::engine::manager::conduit::ConduitChange::Initialized(
             area,
-        )) => vec![EffectPacket::conduit_initialized(area)],
-        BattleChange::Conduit(crate::engine::manager::conduit::ConduitChange::RosterRefreshed(
+        ))
+        | BattleChange::Conduit(
+            crate::engine::manager::conduit::ConduitChange::StateSynchronized(area),
+        )
+        | BattleChange::Conduit(crate::engine::manager::conduit::ConduitChange::RosterRefreshed(
             area,
         )) => vec![EffectPacket::conduit_initialized(area)],
         BattleChange::Conduit(crate::engine::manager::conduit::ConduitChange::GroupSelected {

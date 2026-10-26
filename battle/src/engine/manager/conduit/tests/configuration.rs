@@ -303,3 +303,107 @@ fn device_skill_spends_its_configured_power_and_updates_round_counters() {
     assert_eq!(manager.consumed(1, 1), 3);
     assert_eq!(manager.uses(10), 1);
 }
+
+#[test]
+fn state_snapshots_preserve_initialized_device_runtime_state() {
+    crate::test_support::init_config();
+    let fight = Fight {
+        attacker: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(10),
+                model_id: Some(3149),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut manager = ConduitManager::seed(&fight);
+    assert!(manager.state_snapshots().next().is_none());
+    manager
+        .execute(ConduitCommand::Initialize { team: 1 })
+        .unwrap();
+    manager
+        .execute(ConduitCommand::SelectGroup {
+            source_uid: 10,
+            group: 2,
+        })
+        .unwrap();
+    let selected_skill = manager.selected_skills(10).unwrap()[0].skill_id;
+    let stopped_skill = manager
+        .skill_ids()
+        .find(|skill_id| *skill_id != selected_skill)
+        .unwrap();
+    manager
+        .execute(ConduitCommand::StopSkill {
+            origin: ORIGIN,
+            source_uid: 10,
+            team: 1,
+            skill_id: stopped_skill,
+        })
+        .unwrap();
+    manager
+        .execute(ConduitCommand::ChangePower(ConduitPowerChange {
+            origin: ORIGIN,
+            source_uid: 10,
+            team: 1,
+            power_id: 1,
+            delta: 4,
+            kind: ConduitPowerChangeKind::Standard,
+        }))
+        .unwrap();
+    manager
+        .execute(ConduitCommand::BeginSkill {
+            source_uid: 10,
+            skill_id: selected_skill,
+            cost_reduction: 0,
+        })
+        .unwrap();
+    manager
+        .execute(ConduitCommand::SetRunning {
+            source_uid: 10,
+            running: true,
+        })
+        .unwrap();
+
+    let before = manager.clone();
+    let first: Vec<_> = manager.state_snapshots().collect();
+    let second: Vec<_> = manager.state_snapshots().collect();
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 1);
+    assert!(matches!(first[0], ConduitChange::StateSynchronized(_)));
+    assert_eq!(manager.areas, before.areas);
+    assert_eq!(manager.initialized, before.initialized);
+    assert_eq!(manager.consumed_this_round, before.consumed_this_round);
+    assert_eq!(manager.uses_this_round, before.uses_this_round);
+    assert_eq!(manager.counters_this_round, before.counters_this_round);
+    assert_eq!(manager.current_costs, before.current_costs);
+    assert_eq!(
+        format!("{:?}", manager.pending_activations),
+        format!("{:?}", before.pending_activations)
+    );
+    assert_eq!(manager.running, before.running);
+    assert_eq!(manager.selected_group(10), Some(2));
+    assert!(manager.has_stopped_skill(10));
+
+    manager
+        .execute(ConduitCommand::CommitSkillCost {
+            source_uid: 10,
+            skill_id: selected_skill,
+        })
+        .unwrap();
+    manager
+        .execute(ConduitCommand::CompleteActivation {
+            source_uid: 10,
+            skill_id: selected_skill,
+        })
+        .unwrap();
+    assert_eq!(manager.power(1, 1), 4);
+    assert_eq!(manager.consumed(1, 1), 0);
+}
+
+#[test]
+fn state_snapshots_skip_ordinary_and_uninitialized_areas() {
+    let empty = ConduitManager::default();
+    assert!(empty.state_snapshots().next().is_none());
+}

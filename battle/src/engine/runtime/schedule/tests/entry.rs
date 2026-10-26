@@ -370,7 +370,7 @@ fn wave_entry_event_and_setup_each_own_their_stage() {
         }
     }
 
-    let wave = run_wave_entry(crate::engine::manager::wave::WaveAdvanced {
+    let wave = run_wave_entry(&managers.conduit, crate::engine::manager::wave::WaveAdvanced {
         wave: 2,
         entering_uids: vec![-3],
         fight: fight.clone(),

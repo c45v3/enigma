@@ -720,6 +720,7 @@ pub fn run_wave_entry_setup(
 }
 
 pub fn run_wave_entry(
+    conduit: &crate::engine::manager::conduit::ConduitManager,
     change: crate::engine::manager::wave::WaveAdvanced,
 ) -> Result<DrainResult, DrainError> {
     let mut result = DrainResult::default();
@@ -733,6 +734,13 @@ pub fn run_wave_entry(
         &root,
         BattleChange::WaveAdvanced(Box::new(change.clone())),
     );
+    for conduit_change in conduit.state_snapshots() {
+        crate::engine::runtime::record::push_change(
+            &mut result.frames,
+            &root,
+            BattleChange::Conduit(conduit_change),
+        );
+    }
     Ok(result)
 }
 
