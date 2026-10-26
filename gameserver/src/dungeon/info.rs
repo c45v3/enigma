@@ -35,6 +35,15 @@ pub async fn instruction_dungeon_push(
         open_ids: info.open_ids,
     })
 }
+pub async fn compensate_fairytale_clears(
+    db: &SqlitePool,
+    player_id: i64,
+) -> Result<crate::logic::dungeon::FairytaleCompensation, AppError> {
+    Ok(crate::logic::dungeon::DungeonManager::new(player_id)
+        .compensate_fairytale_clears(db)
+        .await?)
+}
+
 
 pub async fn dungeon_info(
     db: &SqlitePool,

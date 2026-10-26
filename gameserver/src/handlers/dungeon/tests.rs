@@ -40,6 +40,7 @@ fn empty_settlement() -> dungeon::DungeonSettlement {
         hero_ids: Vec::new(),
         rewards: logic::reward::AppliedRewards::default(),
         dungeon_update: sonettobuf::DungeonUpdatePush::default(),
+        fairytale_dungeon_update: None,
         open_infos: Vec::new(),
         end_dungeon: sonettobuf::EndDungeonPush::default(),
         compose_push: None,

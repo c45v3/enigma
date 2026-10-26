@@ -408,3 +408,87 @@ fn permanent_clears_use_their_guaranteed_reward_source() {
     }
     assert!(reward::parse_fixed_reward(2130202, 25).is_empty());
 }
+
+#[tokio::test]
+async fn logic_compensate_fairytale_clears_awards_rewards_and_is_idempotent() {
+    let pool = test_pool(41).await;
+    database::db::starter_data::load_all_starter_data(&pool, 41)
+        .await
+        .unwrap();
+
+    // Pre-insert cleared story episode 10403
+    sqlx::query(
+        "INSERT INTO user_dungeons
+         (user_id, chapter_id, episode_id, star, challenge_count, has_record,
+          left_return_all_num, today_pass_num, today_total_num, created_at, updated_at)
+         VALUES (41, 104, 10403, 2, 1, 0, 1, 1, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let currency_before: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 41 AND currency_id = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let manager = DungeonManager::new(41);
+    let compensation = manager.compensate_fairytale_clears(&pool).await.unwrap();
+    assert_eq!(compensation.compensated_episodes, vec![403]);
+
+    let ft_star = dungeons::episode_star(&pool, 41, 403).await.unwrap();
+    assert_eq!(ft_star, 2);
+
+    let currency_after: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 41 AND currency_id = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(currency_after, currency_before + 20);
+
+    // Idempotent rerun
+    let compensation2 = manager.compensate_fairytale_clears(&pool).await.unwrap();
+    assert!(compensation2.compensated_episodes.is_empty());
+    let currency_after2: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 41 AND currency_id = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(currency_after2, currency_after);
+}
+
+#[tokio::test]
+async fn logic_complete_episode_auto_clears_linked_fairytale() {
+    let pool = test_pool(42).await;
+    database::db::starter_data::load_all_starter_data(&pool, 42)
+        .await
+        .unwrap();
+
+    let currency_before: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 42 AND currency_id = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let completion = complete_episode(&pool, 42, 10403).await.unwrap();
+    assert!(completion.changed);
+
+    let story_star = dungeons::episode_star(&pool, 42, 10403).await.unwrap();
+    let ft_star = dungeons::episode_star(&pool, 42, 403).await.unwrap();
+    assert_eq!(story_star, 2);
+    assert_eq!(ft_star, 2);
+
+    // Both story advanced bonus (60) and fairytale first bonus (20) granted = 80
+    let currency_after: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 42 AND currency_id = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(currency_after, currency_before + 80);
+}

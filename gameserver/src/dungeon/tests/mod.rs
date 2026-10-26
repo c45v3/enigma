@@ -95,3 +95,4 @@ mod act128;
 mod act229;
 mod lifecycle;
 mod settlement;
+mod fairytale;

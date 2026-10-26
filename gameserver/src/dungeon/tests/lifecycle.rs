@@ -383,6 +383,7 @@ async fn completed_tutorial_sends_tasks_before_room_unlock() {
                 ..Default::default()
             },
             dungeon_update: DungeonUpdatePush::default(),
+            fairytale_dungeon_update: None,
             open_infos: vec![OpenInfo::default()],
             end_dungeon: EndDungeonPush::default(),
             compose_push: None,

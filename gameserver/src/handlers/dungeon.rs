@@ -236,6 +236,10 @@ pub async fn on_get_dungeon(
     req: ClientPacket,
 ) -> Result<(), AppError> {
     let player_id = ctx.player()?.id;
+    let compensation = dungeon::compensate_fairytale_clears(ctx.state.db, player_id).await?;
+    if !compensation.compensated_episodes.is_empty() {
+        push::send_dungeon_completion_reward_pushes(ctx, player_id, compensation.rewards).await?;
+    }
     let (reply, dungeons) = dungeon::dungeon_info(ctx.state.db, player_id).await?;
 
     ctx.send_reply(CmdId::GetDungeonCmd, reply, 0, req.up_tag)
@@ -862,6 +866,9 @@ async fn send_dungeon_settlement(
     push::send_instruction_dungeon_progression(ctx, player_id).await?;
     ctx.notify(CmdId::DungeonUpdatePushCmd, settlement.dungeon_update)
         .await?;
+    if let Some(ft_update) = settlement.fairytale_dungeon_update {
+        ctx.notify(CmdId::DungeonUpdatePushCmd, ft_update).await?;
+    }
     ctx.notify(CmdId::DungeonEndDungeonPushCmd, settlement.end_dungeon)
         .await
 }

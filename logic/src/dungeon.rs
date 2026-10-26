@@ -10,7 +10,7 @@ use sonettobuf::{
     GetMapElementRecordReply, GetPointRewardReply, MapElementRecordInfo, MapElementReply, OpenInfo,
 };
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const SHARED_REWARD_POINT_CHAPTER_ID: i32 = 0;
 const MAX_MAP_ELEMENT_RECORD_BYTES: usize = 64 * 1024;
@@ -30,6 +30,15 @@ pub struct TrailCompletion {
     pub rewards: AppliedRewards,
     pub material_changes: BTreeMap<i32, Vec<(u32, u32, i32)>>,
 }
+#[derive(Default)]
+pub struct FairytaleCompensation {
+    pub compensated_episodes: Vec<i32>,
+    pub dungeons: Vec<UserDungeon>,
+    pub rewards: AppliedRewards,
+    pub material_changes: Vec<(u32, u32, i32)>,
+    pub dungeon_updates: Vec<sonettobuf::DungeonUpdatePush>,
+}
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct DungeonManager {
@@ -135,6 +144,92 @@ impl DungeonManager {
             material_changes,
         })
     }
+    pub async fn compensate_fairytale_clears(
+        self,
+        db: &SqlitePool,
+    ) -> Result<FairytaleCompensation, AppError> {
+        let mut tx = db.begin().await?;
+        let compensation = self
+            .compensate_fairytale_clears_in_transaction(&mut tx)
+            .await?;
+        tx.commit().await?;
+        Ok(compensation)
+    }
+
+    pub async fn compensate_fairytale_clears_in_transaction(
+        self,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> Result<FairytaleCompensation, AppError> {
+        let tables = config::configs::get();
+        let user_dungeons = sqlx::query_as::<_, UserDungeon>(
+            "SELECT * FROM user_dungeons WHERE user_id = ? AND star > 0",
+        )
+        .bind(self.player_id)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let cleared_map: HashMap<i32, i32> = user_dungeons
+            .iter()
+            .map(|d| (d.episode_id, d.star))
+            .collect();
+
+        let mut compensated_episodes = Vec::new();
+        let mut compensated_dungeons = Vec::new();
+        let mut reward_set = RewardSet::default();
+        let mut material_changes = Vec::new();
+        let mut dungeon_updates = Vec::new();
+        let mut seen_fairytale_ids = HashSet::new();
+
+        for (episode_id, star) in &cleared_map {
+            let Some(story_ep) = tables.episode.get(*episode_id) else {
+                continue;
+            };
+            let Some(ft_ep) = tables.linked_fairytale_episode(story_ep) else {
+                continue;
+            };
+            if cleared_map.contains_key(&ft_ep.id) || !seen_fairytale_ids.insert(ft_ep.id) {
+                continue;
+            }
+            let ft_star = (*star).max(1);
+            let (ft_dungeon, ft_chapter_type_nums) =
+                dungeons::update_dungeon_progress_in_transaction(
+                    tx,
+                    self.player_id,
+                    ft_ep.chapter_id,
+                    ft_ep.id,
+                    ft_star,
+                )
+                .await?;
+            let ft_completion = completion_rewards(ft_ep, true, 0, ft_star, 1);
+            material_changes.extend(ft_completion.rewards.material_changes());
+            reward_set.extend(ft_completion.rewards);
+            compensated_episodes.push(ft_ep.id);
+            compensated_dungeons.push(ft_dungeon.clone());
+            dungeon_updates.push(sonettobuf::DungeonUpdatePush {
+                dungeon_info: Some(ft_dungeon.into()),
+                chapter_type_nums: ft_chapter_type_nums.into_iter().map(Into::into).collect(),
+            });
+        }
+
+        let rewards = if !compensated_episodes.is_empty() {
+            let applied = RewardManager::new(self.player_id)
+                .apply_dungeon_in_transaction(tx, reward_set)
+                .await?;
+            open_infos::reconcile_progression_in_transaction(tx, self.player_id).await?;
+            applied
+        } else {
+            AppliedRewards::default()
+        };
+
+        Ok(FairytaleCompensation {
+            compensated_episodes,
+            dungeons: compensated_dungeons,
+            rewards,
+            material_changes,
+            dungeon_updates,
+        })
+    }
+
 
     pub async fn complete_map_element(
         self,
@@ -501,6 +596,31 @@ async fn complete_episode_in_transaction(
         rewards = RewardManager::new(player_id)
             .apply_dungeon_in_transaction(tx, completion.rewards)
             .await?;
+    }
+    let tables = config::configs::get();
+    if let Some(ft_episode) = (repair_star.is_some() || previous_star == 0)
+        .then(|| tables.linked_fairytale_episode(episode))
+        .flatten()
+    {
+            let ft_previous_star =
+                dungeons::episode_star_in_transaction(tx, player_id, ft_episode.id).await?;
+            if ft_previous_star == 0 {
+                let ft_star = configured_clear_star(ft_episode);
+                dungeons::update_dungeon_progress_in_transaction(
+                    tx,
+                    player_id,
+                    ft_episode.chapter_id,
+                    ft_episode.id,
+                    ft_star,
+                )
+                .await?;
+                let ft_completion = completion_rewards(ft_episode, true, 0, ft_star, 1);
+                material_changes.extend(ft_completion.rewards.material_changes());
+                let ft_rewards = RewardManager::new(player_id)
+                    .apply_dungeon_in_transaction(tx, ft_completion.rewards)
+                    .await?;
+                rewards.extend(ft_rewards);
+            }
     }
     if dungeon.is_some() || rewards.player_info_changed {
         changed_open_infos =
