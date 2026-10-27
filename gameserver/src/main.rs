@@ -20,8 +20,15 @@ use tracing::info;
 
 use crate::net::{app::AppState, session::handle_client};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     init_tracing();
 
     let cfg = load_config()?;
