@@ -91,14 +91,16 @@ fn completed_attack_target_count_keeps_its_after_damage_route() {
 
 #[test]
 fn attack_modifier_target_count_keeps_its_exact_predicate_route() {
-    assert_eq!(
-        parse(53203, "HurtNumType", &["1".into()]),
-        Some(ParsedConditionKind::DamageTargetCountKind(1))
-    );
-    assert_eq!(
-        find_key(53203, "HurtNumType").map(|definition| definition.role),
-        Some(ConditionRole::Predicate)
-    );
+    for opcode in [53203, 53204] {
+        assert_eq!(
+            parse(opcode, "HurtNumType", &["1".into()]),
+            Some(ParsedConditionKind::DamageTargetCountKind(1))
+        );
+        assert_eq!(
+            find_key(opcode, "HurtNumType").map(|definition| definition.role),
+            Some(ConditionRole::Predicate)
+        );
+    }
 }
 
 #[test]
