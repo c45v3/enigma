@@ -93,6 +93,6 @@ fn act128_runtime_with_score(
 
 mod act128;
 mod act229;
+mod fairytale;
 mod lifecycle;
 mod settlement;
-mod fairytale;

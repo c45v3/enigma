@@ -44,7 +44,6 @@ pub async fn compensate_fairytale_clears(
         .await?)
 }
 
-
 pub async fn dungeon_info(
     db: &SqlitePool,
     player_id: i64,

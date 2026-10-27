@@ -167,31 +167,30 @@ pub(crate) async fn settle_completion_in_transaction(
         .then(|| tables.linked_fairytale_episode(episode))
         .flatten()
     {
-            let ft_previous_star =
-                dungeons::episode_star_in_transaction(tx, player_id, ft_episode.id).await?;
-            if ft_previous_star == 0 {
-                let ft_star = star.max(1);
-                let (ft_dungeon_info, ft_chapter_type_nums) =
-                    dungeons::update_dungeon_progress_in_transaction(
-                        tx,
-                        player_id,
-                        ft_episode.chapter_id,
-                        ft_episode.id,
-                        ft_star,
-                    )
-                    .await?;
-                let ft_completion =
-                    logic::dungeon::completion_rewards(ft_episode, true, 0, ft_star, 1);
-                let ft_applied = reward::RewardManager::new(player_id)
-                    .apply_dungeon_in_transaction(tx, ft_completion.rewards)
-                    .await?;
-                rewards.extend(ft_applied);
-                fairytale_dungeon_update = Some(DungeonUpdatePush {
-                    dungeon_info: Some(ft_dungeon_info.into()),
-                    chapter_type_nums: ft_chapter_type_nums.into_iter().map(Into::into).collect(),
-                });
-            }
+        let ft_previous_star =
+            dungeons::episode_star_in_transaction(tx, player_id, ft_episode.id).await?;
+        if ft_previous_star == 0 {
+            let ft_star = star.max(1);
+            let (ft_dungeon_info, ft_chapter_type_nums) =
+                dungeons::update_dungeon_progress_in_transaction(
+                    tx,
+                    player_id,
+                    ft_episode.chapter_id,
+                    ft_episode.id,
+                    ft_star,
+                )
+                .await?;
+            let ft_completion = logic::dungeon::completion_rewards(ft_episode, true, 0, ft_star, 1);
+            let ft_applied = reward::RewardManager::new(player_id)
+                .apply_dungeon_in_transaction(tx, ft_completion.rewards)
+                .await?;
+            rewards.extend(ft_applied);
+            fairytale_dungeon_update = Some(DungeonUpdatePush {
+                dungeon_info: Some(ft_dungeon_info.into()),
+                chapter_type_nums: ft_chapter_type_nums.into_iter().map(Into::into).collect(),
+            });
         }
+    }
 
     let open_infos = open_infos::reconcile_progression_in_transaction(tx, player_id).await?;
 

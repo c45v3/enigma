@@ -65,11 +65,19 @@ async fn story_first_clear_completes_fairytale_in_same_transaction_and_grants_re
 
     // Verify both level statuses are present in the settlement
     assert_eq!(
-        settlement.dungeon_update.dungeon_info.as_ref().and_then(|d| d.episode_id),
+        settlement
+            .dungeon_update
+            .dungeon_info
+            .as_ref()
+            .and_then(|d| d.episode_id),
         Some(10403)
     );
     assert_eq!(
-        settlement.dungeon_update.dungeon_info.as_ref().and_then(|d| d.star),
+        settlement
+            .dungeon_update
+            .dungeon_info
+            .as_ref()
+            .and_then(|d| d.star),
         Some(2)
     );
 
@@ -103,12 +111,11 @@ async fn story_first_clear_completes_fairytale_in_same_transaction_and_grants_re
     assert_eq!(currency_after, currency_before + 80);
 
     // Check item reward from fairytale: 3 of item 110202
-    let item_after: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 101 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_after: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 101 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(item_after, item_before + 3);
 }
 
@@ -142,12 +149,11 @@ async fn story_repeat_clear_does_not_re_reward_or_re_clear_fairytale() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let item_after_first: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 102 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_after_first: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 102 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     // Repeat clear
     let mut tx2 = pool.begin().await.unwrap();
@@ -178,12 +184,11 @@ async fn story_repeat_clear_does_not_re_reward_or_re_clear_fairytale() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let item_after_repeat: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 102 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_after_repeat: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 102 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     assert_eq!(currency_after_repeat, currency_after_first);
     assert_eq!(item_after_repeat, item_after_first);
@@ -223,12 +228,11 @@ async fn story_first_clear_when_fairytale_already_cleared_does_not_duplicate_fai
     .fetch_one(&pool)
     .await
     .unwrap();
-    let item_before_story: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 103 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_before_story: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 103 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     // Now clear story for the first time
     let mut tx_story = pool.begin().await.unwrap();
@@ -262,12 +266,11 @@ async fn story_first_clear_when_fairytale_already_cleared_does_not_duplicate_fai
     assert_eq!(currency_after_story, currency_before_story + 60);
 
     // Fairytale item (110202) must not increase again
-    let item_after_story: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 103 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_after_story: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 103 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(item_after_story, item_before_story);
 }
 
@@ -303,9 +306,7 @@ async fn historical_compensation_clears_fairytale_and_is_idempotent() {
     .unwrap();
 
     // Run historical compensation
-    let compensation = info::compensate_fairytale_clears(&pool, 104)
-        .await
-        .unwrap();
+    let compensation = info::compensate_fairytale_clears(&pool, 104).await.unwrap();
 
     assert_eq!(compensation.compensated_episodes, vec![403]);
     assert_eq!(compensation.dungeon_updates.len(), 1);
@@ -329,18 +330,15 @@ async fn historical_compensation_clears_fairytale_and_is_idempotent() {
     .unwrap();
     assert_eq!(currency_after, currency_before + 20);
 
-    let item_after: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 104 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_after: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 104 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(item_after, item_before + 3);
 
     // Second run must be completely idempotent
-    let compensation2 = info::compensate_fairytale_clears(&pool, 104)
-        .await
-        .unwrap();
+    let compensation2 = info::compensate_fairytale_clears(&pool, 104).await.unwrap();
     assert!(compensation2.compensated_episodes.is_empty());
     assert!(compensation2.dungeon_updates.is_empty());
 
@@ -352,12 +350,11 @@ async fn historical_compensation_clears_fairytale_and_is_idempotent() {
     .unwrap();
     assert_eq!(currency_after2, currency_after);
 
-    let item_after2: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM items WHERE user_id = 104 AND item_id = 110202",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let item_after2: i32 =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 104 AND item_id = 110202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(item_after2, item_after);
 }
 
@@ -429,7 +426,14 @@ async fn settlement_failure_rolls_back_both_story_and_fairytale() {
 async fn hard_mode_peril_settlement_does_not_affect_fairytale() {
     let pool = test_pool(106).await;
     let episode = configs::get().episode.get(20401).unwrap();
-    assert_eq!(configs::get().chapter.get(episode.chapter_id).unwrap().r#type, 2);
+    assert_eq!(
+        configs::get()
+            .chapter
+            .get(episode.chapter_id)
+            .unwrap()
+            .r#type,
+        2
+    );
 
     let mut tx = pool.begin().await.unwrap();
     let settlement = crate::dungeon::settle_completion_in_transaction(
