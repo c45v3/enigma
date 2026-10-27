@@ -142,6 +142,114 @@ fn auto_round_keeps_the_selected_enemy_for_all_queued_attacks() {
 }
 
 #[test]
+fn auto_round_reports_client_selected_group() {
+    crate::test_support::init_config();
+    let entity = |uid, team_type| FightEntityInfo {
+        uid: Some(uid),
+        model_id: Some(3149),
+        team_type: Some(team_type),
+        position: Some(if team_type == 1 { 1 } else { -1 }),
+        current_hp: Some(100_000),
+        attr: Some(HeroAttribute {
+            hp: Some(100_000),
+            attack: Some(1_000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let fight = Fight {
+        version: Some(7),
+        attacker: Some(FightTeam {
+            entitys: vec![entity(10, 1)],
+            device_area: Some(sonettobuf::FightDeviceAreaInfo::default()),
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![entity(-1, 2)],
+            device_area: Some(sonettobuf::FightDeviceAreaInfo::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut runtime = runtime(fight);
+    runtime
+        .advance_round(BeginRoundRequest {
+            opers: Vec::new(),
+            auto_oper: Some(true),
+            devices_opers: vec![sonettobuf::FightDeviceOper {
+                uid: Some(10),
+                index: Some(2),
+            }],
+        })
+        .unwrap();
+
+    let reply = runtime.plan_auto_round(&AutoRoundRequest::default());
+
+    assert_eq!(
+        reply.devices_opers,
+        vec![sonettobuf::FightDeviceOper {
+            uid: Some(10),
+            index: Some(2),
+        }]
+    );
+}
+
+#[test]
+fn auto_round_plays_device_energy_cards_missing_from_the_catalog() {
+    crate::test_support::init_config();
+    let fight = Fight {
+        version: Some(7),
+        attacker: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(10),
+                model_id: Some(3149),
+                team_type: Some(1),
+                position: Some(1),
+                current_hp: Some(100_000),
+                attr: Some(HeroAttribute {
+                    hp: Some(100_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            device_area: Some(sonettobuf::FightDeviceAreaInfo::default()),
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(-1),
+                team_type: Some(2),
+                position: Some(1),
+                current_hp: Some(100_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut runtime = runtime(fight);
+    runtime
+        .managers
+        .execute_card(CardCommand::Setup(CardSetup {
+            hand: vec![CardInfo {
+                uid: Some(10),
+                skill_id: Some(31446012),
+                temp_card: Some(false),
+                ..Default::default()
+            }],
+            draw_pile: Vec::new(),
+            deck_num: 0,
+        }))
+        .unwrap();
+    runtime.round_state.act_point = 1;
+
+    let reply = runtime.plan_auto_round(&AutoRoundRequest::default());
+
+    assert_eq!(reply.opers.len(), 1, "the energy card must be played");
+    assert_eq!(reply.opers[0].param1, Some(1));
+}
+
+#[test]
 fn auto_round_returns_only_attacker_conduit_operations() {
     crate::test_support::init_config();
     let entity = |uid, team_type| FightEntityInfo {
