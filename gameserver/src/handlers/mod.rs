@@ -33,6 +33,7 @@ pub mod property;
 pub mod red_dot;
 pub mod room;
 pub mod rouge;
+pub mod siege;
 pub mod sign_in;
 pub mod stat;
 pub mod store;

@@ -99,6 +99,7 @@ pub const FILTER_TABLES: &[&str] = &[
     "talent_style_cost",
     "skill_effect",
     "skill_target_type_define",
+    "siege_battle",
     "ai_monster_target",
     "skill_behavior",
     "character_rank_replace",

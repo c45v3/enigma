@@ -5,6 +5,7 @@ mod handlers;
 mod net;
 mod player;
 mod session;
+mod siege;
 mod tower;
 mod tower_compose;
 mod util;

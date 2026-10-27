@@ -361,6 +361,7 @@ pub mod rule;
 pub mod same_currency_exchange;
 pub mod scene_switch;
 pub mod scene_ui;
+pub mod siege_battle;
 pub mod sign_in_addup_bonus;
 pub mod sign_in_bonus;
 pub mod sign_in_lifetime_bonus;
@@ -827,6 +828,7 @@ pub struct GameDB {
     pub same_currency_exchange: same_currency_exchange::SameCurrencyExchangeTable,
     pub scene_switch: scene_switch::SceneSwitchTable,
     pub scene_ui: scene_ui::SceneUiTable,
+    pub siege_battle: siege_battle::SiegeBattleTable,
     pub sign_in_addup_bonus: sign_in_addup_bonus::SignInAddupBonusTable,
     pub sign_in_bonus: sign_in_bonus::SignInBonusTable,
     pub sign_in_lifetime_bonus: sign_in_lifetime_bonus::SignInLifetimeBonusTable,
@@ -2016,6 +2018,9 @@ impl GameDB {
         let scene_ui = scene_ui::SceneUiTable::load(
             &format!("{}/scene_ui.json", data_dir)
         ).map_err(|e| anyhow::anyhow!("Failed to load scene_ui.json: {}", e))?;
+        let siege_battle = siege_battle::SiegeBattleTable::load(
+            &format!("{}/siege_battle.json", data_dir)
+        ).map_err(|e| anyhow::anyhow!("Failed to load siege_battle.json: {}", e))?;
         let sign_in_addup_bonus = sign_in_addup_bonus::SignInAddupBonusTable::load(
             &format!("{}/sign_in_addup_bonus.json", data_dir)
         ).map_err(|e| anyhow::anyhow!("Failed to load sign_in_addup_bonus.json: {}", e))?;
@@ -2683,6 +2688,7 @@ impl GameDB {
             same_currency_exchange,
             scene_switch,
             scene_ui,
+            siege_battle,
             sign_in_addup_bonus,
             sign_in_bonus,
             sign_in_lifetime_bonus,

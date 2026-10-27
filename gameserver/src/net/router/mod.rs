@@ -3,7 +3,8 @@ use crate::handlers::{
     activity, arcade, bgm, bp, charge, chat, collection, command_post, common, critter, dice_hero,
     dungeon, equipment, exploration, fairyland, friends, guide, hero, hero_group, hero_invitation,
     inventory, investigate, mail, manufacture, milestone, misc, odyssey, party, player_card,
-    player_info, player_misc, property, red_dot, room, rouge, sign_in, stat, store, story, summon,
+    player_info, player_misc, property, red_dot, room, rouge, siege, sign_in, stat, store, story,
+    summon,
     survival, system, talent, tasks, teaching, tower, tower_compose, trade, turnback, udimo, user,
 };
 use crate::net::context::ConnectionContext;
@@ -180,6 +181,9 @@ async fn dispatch_registered_command(
         CmdId::EntityInfoCmd => dungeon::on_entity_info,
         CmdId::DungeonEndDungeonCmd => dungeon::on_dungeon_end_dungeon,
         CmdId::CoverDungeonRecordCmd => dungeon::on_cover_dungeon_record,
+        CmdId::GetSiegeBattleInfoCmd => siege::on_get_info,
+        CmdId::StartSiegeBattleCmd => siege::on_start,
+        CmdId::AbandonSiegeBattleCmd => siege::on_abandon,
         CmdId::DungeonInstructionDungeonInfoCmd => dungeon::on_instruction_dungeon_info,
         CmdId::InstructionDungeonOpenCmd => dungeon::on_instruction_dungeon_open,
         CmdId::InstructionDungeonRewardCmd => dungeon::on_instruction_dungeon_reward,
