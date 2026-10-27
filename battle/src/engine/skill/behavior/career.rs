@@ -18,7 +18,7 @@ impl BehaviorHandler for Handler {
             (BehaviorKind::CareerRatioFix, [bonus]) if *bonus != 0
         ) || matches!(
             (behavior.spec.kind, behavior.args.as_slice()),
-            (BehaviorKind::ChangeCareer, [career]) if (1..=6).contains(career)
+            (BehaviorKind::ChangeCareer, [career]) if normalized_career(*career).is_some()
         ) || matches!(
             (behavior.spec.kind, behavior.args.as_slice()),
             (BehaviorKind::ChangeAttackCareer, [career]) if (1..=8).contains(career)
@@ -29,15 +29,14 @@ impl BehaviorHandler for Handler {
     fn emit_ops(context: BehaviorOpContext<'_>, behavior: &ParsedBehavior) -> Option<Vec<RuleOp>> {
         if let (BehaviorKind::ChangeCareer, [career]) =
             (behavior.spec.kind, behavior.args.as_slice())
+            && let Some(career) = normalized_career(*career)
         {
-            return (1..=6).contains(career).then(|| {
-                vec![RuleOp::Command(BattleCommand::Entity(EntityCommand {
-                    origin: super::command_origin(behavior).expect("registered behavior"),
-                    source_uid: context.source_uid,
-                    target_uid: context.target_uid,
-                    operation: EntityOperation::ChangeCareer { career: *career },
-                }))]
-            });
+            return Some(vec![RuleOp::Command(BattleCommand::Entity(EntityCommand {
+                origin: super::command_origin(behavior).expect("registered behavior"),
+                source_uid: context.source_uid,
+                target_uid: context.target_uid,
+                operation: EntityOperation::ChangeCareer { career },
+            }))]);
         }
         apply(context.modifiers, behavior).then(Vec::new)
     }
@@ -47,6 +46,17 @@ impl BehaviorHandler for Handler {
         behavior: &ParsedBehavior,
     ) -> bool {
         apply(context.operation.modifiers, behavior)
+    }
+}
+
+// Enemy skill data also contains legacy 1000-prefixed career values for
+// ChangeCareer (e.g. 50013#1002). SkillChangeAttackCareer (100036) only uses
+// plain values (1, 2) in skill_effect.json, so it needs no normalization.
+fn normalized_career(career: i32) -> Option<i32> {
+    match career {
+        1..=6 => Some(career),
+        1001..=1006 => Some(career - 1000),
+        _ => None,
     }
 }
 
@@ -136,6 +146,15 @@ mod tests {
                 ..
             }))]
         ));
+    }
+    #[test]
+    fn legacy_career_codes_are_normalized() {
+        assert!(Handler::supports(&ParsedBehavior::new(
+            50013,
+            "ChangeCareer",
+            vec![1002],
+        )));
+        assert_eq!(normalized_career(1002), Some(2));
     }
 
     #[test]

@@ -70,6 +70,26 @@ fn slot_parser_rejects_malformed_targets() {
 }
 
 #[test]
+fn accepts_legacy_change_career_codes() {
+    init_config();
+    let slot = parse_slot(
+        config::configs::get(),
+        RawSlot {
+            behavior: "50013#1002",
+            target: "103",
+            condition: "",
+            condition_target: "103",
+            logic_target: "103",
+            limit: 0,
+            round_limit: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(slot.behavior.args, vec![1002]);
+}
+
+#[test]
 fn deck_top_rank_behavior_keeps_exact_config_identity() {
     init_config();
 
