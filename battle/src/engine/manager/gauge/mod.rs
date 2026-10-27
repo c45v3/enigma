@@ -478,265 +478,281 @@ impl GaugeManager {
         {
             return Err(GaugeCommandError::InvalidCommand);
         }
-        match command.operation {
-            GaugeOperation::Enable { max } => {
-                if max.is_some_and(|value| value < 0) {
-                    return Err(GaugeCommandError::InvalidCommand);
-                }
-                let existing = self.states.get(&command.key).copied();
-                if existing.is_none()
-                    && let Some(max) = max
-                {
-                    self.base_max.insert(command.key, max);
-                    if self.opening_setup {
-                        self.opening_max.insert(command.key, max);
+        let result = (|| -> Result<GaugeChange, GaugeCommandError> {
+            match command.operation {
+                GaugeOperation::Enable { max } => {
+                    if max.is_some_and(|value| value < 0) {
+                        return Err(GaugeCommandError::InvalidCommand);
                     }
+                    let existing = self.states.get(&command.key).copied();
+                    if existing.is_none()
+                        && let Some(max) = max
+                    {
+                        self.base_max.insert(command.key, max);
+                        if self.opening_setup {
+                            self.opening_max.insert(command.key, max);
+                        }
+                    }
+                    let before = existing.unwrap_or_default();
+                    let after = *self
+                        .states
+                        .entry(command.key)
+                        .or_insert(GaugeState { current: 0, max });
+                    self.raw_values
+                        .entry(command.key)
+                        .or_insert(after.current.saturating_mul(1000));
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Enabled,
+                        before,
+                        after,
+                        0,
+                        0,
+                        (existing.is_some(), true),
+                    ))
                 }
-                let before = existing.unwrap_or_default();
-                let after = *self
-                    .states
-                    .entry(command.key)
-                    .or_insert(GaugeState { current: 0, max });
-                self.raw_values
-                    .entry(command.key)
-                    .or_insert(after.current.saturating_mul(1000));
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Enabled,
-                    before,
-                    after,
-                    0,
-                    0,
-                    (existing.is_some(), true),
-                ))
-            }
-            GaugeOperation::ChangeValue { delta } => self.change_value(command, delta, false),
-            GaugeOperation::AccumulateRawValue { amount, stream } => {
-                if amount <= 0 || stream <= 0 {
-                    return Err(GaugeCommandError::InvalidCommand);
+                GaugeOperation::ChangeValue { delta } => self.change_value(command, delta, false),
+                GaugeOperation::AccumulateRawValue { amount, stream } => {
+                    if amount <= 0 || stream <= 0 {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    }
+                    let state = self
+                        .states
+                        .get(&command.key)
+                        .copied()
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let capacity = state.max.map_or(i32::MAX, |max| max - state.current).max(0);
+                    if capacity == 0 {
+                        return self.change_value(command, 0, true);
+                    }
+                    let raw_before = self
+                        .raw_values
+                        .get(&command.key)
+                        .copied()
+                        .unwrap_or_else(|| state.current.saturating_mul(1000));
+                    let raw_after = raw_before
+                        .saturating_add(amount)
+                        .min(state.max.map_or(i32::MAX, |max| max.saturating_mul(1000)));
+                    let visible_after = raw_after / 1000;
+                    let delta = visible_after.saturating_sub(state.current).min(capacity);
+                    let command = command
+                        .with_raw_delta(amount)
+                        .with_progress_raw_delta(amount);
+                    self.change_value(command, delta, true)
                 }
-                let state = self
-                    .states
-                    .get(&command.key)
-                    .copied()
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let capacity = state.max.map_or(i32::MAX, |max| max - state.current).max(0);
-                if capacity == 0 {
-                    return self.change_value(command, 0, true);
+                GaugeOperation::AccumulateValue { amount, threshold } => {
+                    if amount <= 0 || threshold <= 0 {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    }
+                    let state = self
+                        .states
+                        .get(&command.key)
+                        .copied()
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let capacity = state.max.map_or(i32::MAX, |max| max - state.current).max(0);
+                    if capacity == 0 {
+                        return self.change_value(command, 0, true);
+                    }
+                    let accumulator = self.accumulators.entry(command.key).or_default();
+                    let accumulator_before = *accumulator;
+                    *accumulator = accumulator.saturating_add(amount);
+                    let delta = (*accumulator / threshold).min(capacity);
+                    *accumulator -= delta * threshold;
+                    if crate::engine::diagnostics::enabled(
+                        crate::engine::diagnostics::TraceArea::Gauge,
+                    ) {
+                        eprintln!(
+                            "gauge accumulation key={:?} origin={:?} source={} skill={} amount={} threshold={} remainder={}->{} delta={}",
+                            command.key,
+                            command.origin,
+                            command.source_uid,
+                            command.source_skill_id,
+                            amount,
+                            threshold,
+                            accumulator_before,
+                            *accumulator,
+                            delta,
+                        );
+                    }
+                    self.change_value(command, delta, true)
                 }
-                let raw_before = self
-                    .raw_values
-                    .get(&command.key)
-                    .copied()
-                    .unwrap_or_else(|| state.current.saturating_mul(1000));
-                let raw_after = raw_before
-                    .saturating_add(amount)
-                    .min(state.max.map_or(i32::MAX, |max| max.saturating_mul(1000)));
-                let visible_after = raw_after / 1000;
-                let delta = visible_after.saturating_sub(state.current).min(capacity);
-                let command = command
-                    .with_raw_delta(amount)
-                    .with_progress_raw_delta(amount);
-                self.change_value(command, delta, true)
-            }
-            GaugeOperation::AccumulateValue { amount, threshold } => {
-                if amount <= 0 || threshold <= 0 {
-                    return Err(GaugeCommandError::InvalidCommand);
-                }
-                let state = self
-                    .states
-                    .get(&command.key)
-                    .copied()
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let capacity = state.max.map_or(i32::MAX, |max| max - state.current).max(0);
-                if capacity == 0 {
-                    return self.change_value(command, 0, true);
-                }
-                let accumulator = self.accumulators.entry(command.key).or_default();
-                let accumulator_before = *accumulator;
-                *accumulator = accumulator.saturating_add(amount);
-                let delta = (*accumulator / threshold).min(capacity);
-                *accumulator -= delta * threshold;
-                if crate::engine::diagnostics::enabled(crate::engine::diagnostics::TraceArea::Gauge)
-                {
-                    eprintln!(
-                        "gauge accumulation key={:?} origin={:?} source={} skill={} amount={} threshold={} remainder={}->{} delta={}",
-                        command.key,
-                        command.origin,
-                        command.source_uid,
-                        command.source_skill_id,
-                        amount,
-                        threshold,
-                        accumulator_before,
-                        *accumulator,
+                GaugeOperation::ChangeMax { delta } => {
+                    if delta == 0 {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    }
+                    let state = self
+                        .states
+                        .get_mut(&command.key)
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let before = *state;
+                    let Some(max) = state.max else {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    };
+                    state.max = Some(max.saturating_add(delta).max(0));
+                    state.current = state.current.min(state.max.unwrap_or_default());
+                    if let Some(raw) = self.raw_values.get_mut(&command.key) {
+                        *raw = (*raw).min(state.max.unwrap_or_default().saturating_mul(1000));
+                    }
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Max,
+                        before,
+                        *state,
                         delta,
-                    );
+                        0,
+                        (true, true),
+                    ))
                 }
-                self.change_value(command, delta, true)
-            }
-            GaugeOperation::ChangeMax { delta } => {
-                if delta == 0 {
-                    return Err(GaugeCommandError::InvalidCommand);
+                GaugeOperation::SyncBaseMax { max } => {
+                    if max < 0 {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    }
+                    let old_base = self
+                        .base_max
+                        .get_mut(&command.key)
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let delta = max.saturating_sub(*old_base);
+                    let state = self
+                        .states
+                        .get_mut(&command.key)
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let before = *state;
+                    let Some(current_max) = state.max else {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    };
+                    *old_base = max;
+                    state.max = Some(current_max.saturating_add(delta).max(0));
+                    state.current = state.current.min(state.max.unwrap_or_default());
+                    if let Some(raw) = self.raw_values.get_mut(&command.key) {
+                        *raw = (*raw).min(state.max.unwrap_or_default().saturating_mul(1000));
+                    }
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Max,
+                        before,
+                        *state,
+                        delta,
+                        0,
+                        (true, true),
+                    ))
                 }
-                let state = self
-                    .states
-                    .get_mut(&command.key)
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let before = *state;
-                let Some(max) = state.max else {
-                    return Err(GaugeCommandError::InvalidCommand);
-                };
-                state.max = Some(max.saturating_add(delta).max(0));
-                state.current = state.current.min(state.max.unwrap_or_default());
-                if let Some(raw) = self.raw_values.get_mut(&command.key) {
-                    *raw = (*raw).min(state.max.unwrap_or_default().saturating_mul(1000));
+                GaugeOperation::ConsumeAccumulated {
+                    listener_uid,
+                    listener_opcode,
+                    amount,
+                } => {
+                    if listener_uid == 0 || listener_opcode <= 0 || amount <= 0 {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    }
+                    let before = self
+                        .accumulated_value(command.key, listener_uid, listener_opcode)
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let applied = amount.min(before);
+                    *self
+                        .consumed_raw_progress
+                        .entry((command.key, listener_uid, listener_opcode))
+                        .or_default() += applied.saturating_mul(1000);
+                    let after = before - applied;
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Accumulated,
+                        GaugeState {
+                            current: before,
+                            max: None,
+                        },
+                        GaugeState {
+                            current: after,
+                            max: None,
+                        },
+                        -amount,
+                        0,
+                        (true, true),
+                    ))
                 }
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Max,
-                    before,
-                    *state,
-                    delta,
-                    0,
-                    (true, true),
-                ))
-            }
-            GaugeOperation::SyncBaseMax { max } => {
-                if max < 0 {
-                    return Err(GaugeCommandError::InvalidCommand);
+                GaugeOperation::AccumulateProgress { raw_amount } => {
+                    if raw_amount <= 0 {
+                        return Err(GaugeCommandError::InvalidCommand);
+                    }
+                    self.states
+                        .get(&command.key)
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    let raw = self.positive_raw_gains.entry(command.key).or_default();
+                    let before = *raw / 1000;
+                    *raw = raw.saturating_add(raw_amount);
+                    let after = *raw / 1000;
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Accumulated,
+                        GaugeState {
+                            current: before,
+                            max: None,
+                        },
+                        GaugeState {
+                            current: after,
+                            max: None,
+                        },
+                        raw_amount / 1000,
+                        0,
+                        (true, true),
+                    ))
                 }
-                let old_base = self
-                    .base_max
-                    .get_mut(&command.key)
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let delta = max.saturating_sub(*old_base);
-                let state = self
-                    .states
-                    .get_mut(&command.key)
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let before = *state;
-                let Some(current_max) = state.max else {
-                    return Err(GaugeCommandError::InvalidCommand);
-                };
-                *old_base = max;
-                state.max = Some(current_max.saturating_add(delta).max(0));
-                state.current = state.current.min(state.max.unwrap_or_default());
-                if let Some(raw) = self.raw_values.get_mut(&command.key) {
-                    *raw = (*raw).min(state.max.unwrap_or_default().saturating_mul(1000));
+                GaugeOperation::Snapshot => {
+                    let state = self
+                        .states
+                        .get(&command.key)
+                        .copied()
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Snapshot,
+                        state,
+                        state,
+                        0,
+                        0,
+                        (true, true),
+                    ))
                 }
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Max,
-                    before,
-                    *state,
-                    delta,
-                    0,
-                    (true, true),
-                ))
-            }
-            GaugeOperation::ConsumeAccumulated {
-                listener_uid,
-                listener_opcode,
-                amount,
-            } => {
-                if listener_uid == 0 || listener_opcode <= 0 || amount <= 0 {
-                    return Err(GaugeCommandError::InvalidCommand);
+                GaugeOperation::Disable => {
+                    self.base_max.remove(&command.key);
+                    self.opening_max.remove(&command.key);
+                    self.accumulators.remove(&command.key);
+                    self.raw_values.remove(&command.key);
+                    self.positive_gains.remove(&command.key);
+                    self.positive_raw_gains.remove(&command.key);
+                    self.consumed_raw_progress
+                        .retain(|(key, _, _), _| *key != command.key);
+                    self.positive_gain_round_start.remove(&command.key);
+                    self.positive_threshold_crossings_paid_this_round
+                        .retain(|(key, _, _), _| *key != command.key);
+                    let before = self
+                        .states
+                        .remove(&command.key)
+                        .ok_or(GaugeCommandError::MissingGauge(command.key))?;
+                    Ok(change(
+                        command,
+                        GaugeChangeKind::Disabled,
+                        before,
+                        GaugeState::default(),
+                        0,
+                        0,
+                        (true, false),
+                    ))
                 }
-                let before = self
-                    .accumulated_value(command.key, listener_uid, listener_opcode)
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let applied = amount.min(before);
-                *self
-                    .consumed_raw_progress
-                    .entry((command.key, listener_uid, listener_opcode))
-                    .or_default() += applied.saturating_mul(1000);
-                let after = before - applied;
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Accumulated,
-                    GaugeState {
-                        current: before,
-                        max: None,
-                    },
-                    GaugeState {
-                        current: after,
-                        max: None,
-                    },
-                    -amount,
-                    0,
-                    (true, true),
-                ))
             }
-            GaugeOperation::AccumulateProgress { raw_amount } => {
-                if raw_amount <= 0 {
-                    return Err(GaugeCommandError::InvalidCommand);
-                }
-                self.states
-                    .get(&command.key)
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                let raw = self.positive_raw_gains.entry(command.key).or_default();
-                let before = *raw / 1000;
-                *raw = raw.saturating_add(raw_amount);
-                let after = *raw / 1000;
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Accumulated,
-                    GaugeState {
-                        current: before,
-                        max: None,
-                    },
-                    GaugeState {
-                        current: after,
-                        max: None,
-                    },
-                    raw_amount / 1000,
-                    0,
-                    (true, true),
-                ))
-            }
-            GaugeOperation::Snapshot => {
-                let state = self
-                    .states
-                    .get(&command.key)
-                    .copied()
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Snapshot,
-                    state,
-                    state,
-                    0,
-                    0,
-                    (true, true),
-                ))
-            }
-            GaugeOperation::Disable => {
-                self.base_max.remove(&command.key);
-                self.opening_max.remove(&command.key);
-                self.accumulators.remove(&command.key);
-                self.raw_values.remove(&command.key);
-                self.positive_gains.remove(&command.key);
-                self.positive_raw_gains.remove(&command.key);
-                self.consumed_raw_progress
-                    .retain(|(key, _, _), _| *key != command.key);
-                self.positive_gain_round_start.remove(&command.key);
-                self.positive_threshold_crossings_paid_this_round
-                    .retain(|(key, _, _), _| *key != command.key);
-                let before = self
-                    .states
-                    .remove(&command.key)
-                    .ok_or(GaugeCommandError::MissingGauge(command.key))?;
-                Ok(change(
-                    command,
-                    GaugeChangeKind::Disabled,
-                    before,
-                    GaugeState::default(),
-                    0,
-                    0,
-                    (true, false),
-                ))
-            }
+        })();
+        if let Err(GaugeCommandError::MissingGauge(key)) = &result
+            && crate::engine::diagnostics::enabled(crate::engine::diagnostics::TraceArea::Gauge)
+        {
+            eprintln!(
+                "gauge command missing gauge key={key:?} operation={:?} origin={:?} source={} skill={} config_effect={}",
+                command.operation,
+                command.origin,
+                command.source_uid,
+                command.source_skill_id,
+                command.config_effect,
+            );
         }
+        result
     }
 
     pub(crate) fn start_raw_batch(

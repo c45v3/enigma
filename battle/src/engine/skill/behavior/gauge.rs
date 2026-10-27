@@ -172,10 +172,21 @@ fn route_shared_pool_change(
     command: GaugeCommand,
 ) -> Vec<RuleOp> {
     match command.key.kind {
-        GaugeKind::Bloodtithe
-            if matches!(command.operation, GaugeOperation::ChangeValue { .. })
-                && managers.gauge.get(command.key).is_none() =>
+        // HeatScale teams intentionally skip Bloodtithe setup; copied pool
+        // mutations are no-ops unless their destination gauge is active.
+        GaugeKind::Bloodtithe | GaugeKind::LingeringGlow
+            if managers.gauge.get(command.key).is_none() =>
         {
+            if crate::engine::diagnostics::enabled(crate::engine::diagnostics::TraceArea::Gauge) {
+                eprintln!(
+                    "skipping inactive shared pool mutation key={:?} operation={:?} origin={:?} source={} skill={}",
+                    command.key,
+                    command.operation,
+                    command.origin,
+                    command.source_uid,
+                    command.source_skill_id,
+                );
+            }
             Vec::new()
         }
         GaugeKind::Bloodtithe => {
@@ -397,6 +408,71 @@ mod tests {
         let managers = BattleManagers::default();
 
         assert!(blood_pool_value_change_ops(&managers).is_empty());
+    }
+
+    #[test]
+    fn blood_pool_max_change_without_bloodtithe_gauge_emits_no_operation() {
+        let behavior = ParsedBehavior::from_spec(
+            BehaviorSpec::new(60190, "BloodPoolMaxChange"),
+            vec![5],
+            Vec::new(),
+        );
+        let mutation = super::SharedPoolMutation::from_behavior(&behavior, 1).unwrap();
+        let command = GaugeCommand::new(
+            super::super::command_origin(&behavior).unwrap(),
+            mutation.key,
+            mutation.operation,
+        );
+
+        assert!(super::route_shared_pool_change(&BattleManagers::default(), command).is_empty());
+    }
+
+    #[test]
+    fn blood_pool_max_change_with_bloodtithe_gauge_emits_configured_delta() {
+        let mut managers = BattleManagers::default();
+        let behavior = ParsedBehavior::from_spec(
+            BehaviorSpec::new(60190, "BloodPoolMaxChange"),
+            vec![5],
+            Vec::new(),
+        );
+        let key = crate::engine::mechanic::bloodtithe::rule::key(1);
+        managers
+            .execute_gauge(GaugeCommand::new(
+                super::super::command_origin(&behavior).unwrap(),
+                key,
+                GaugeOperation::Enable { max: Some(100) },
+            ))
+            .unwrap();
+        let mutation = super::SharedPoolMutation::from_behavior(&behavior, 1).unwrap();
+        let command = GaugeCommand::new(
+            super::super::command_origin(&behavior).unwrap(),
+            mutation.key,
+            mutation.operation,
+        );
+
+        assert!(matches!(
+            super::route_shared_pool_change(&managers, command).as_slice(),
+            [RuleOp::Command(BattleCommand::Gauge(command))]
+                if command.key == key
+                    && command.operation == GaugeOperation::ChangeMax { delta: 5 }
+        ));
+    }
+
+    #[test]
+    fn lingering_glow_value_change_without_gauge_emits_no_operation() {
+        let behavior = ParsedBehavior::from_spec(
+            BehaviorSpec::new(60191, "BloodPoolValueChange"),
+            vec![20_000, 1],
+            Vec::new(),
+        );
+        let mutation = super::SharedPoolMutation::from_behavior(&behavior, 1).unwrap();
+        let command = GaugeCommand::new(
+            super::super::command_origin(&behavior).unwrap(),
+            mutation.key,
+            mutation.operation,
+        );
+
+        assert!(super::route_shared_pool_change(&BattleManagers::default(), command).is_empty());
     }
 
     #[test]
