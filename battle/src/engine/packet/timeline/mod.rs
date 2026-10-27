@@ -327,6 +327,52 @@ fn project_change(
     redeal_layout: RedealWireLayout,
 ) -> Result<Vec<ActEffect>, ProjectionError> {
     Ok(match change {
+        BattleChange::SkillLifecycle(_)
+        | BattleChange::Buff(_)
+        | BattleChange::BuffFanout(_)
+        | BattleChange::RaspberryCapacity(_)
+        | BattleChange::BuffFeatureMarker(_)
+        | BattleChange::EffectMarker(_)
+        | BattleChange::SceneChange { .. }
+        | BattleChange::Contract(_)
+        | BattleChange::FightProgress(_)
+        | BattleChange::FightProgressValue(_)
+        | BattleChange::FightTask(_)
+        | BattleChange::BuffActTrigger(_)
+        | BattleChange::BuffActInfoMarker(_) => project_buff_and_marker(change)?,
+        BattleChange::Hp(changes) => project_hp(
+            changes,
+            writes_reduce_hp,
+            hurt_info_layout,
+            absorb_map_layout,
+        )?,
+        BattleChange::Death(_)
+        | BattleChange::NuoDiKaHit(_)
+        | BattleChange::Injury(_)
+        | BattleChange::Shield(_)
+        | BattleChange::ExPoint(_)
+        | BattleChange::Eureka(_) => project_resource(change, hurt_info_layout, absorb_map_layout)?,
+        BattleChange::Gauge(_) | BattleChange::Emitter(_) => project_gauge(change)?,
+        BattleChange::NuoDiKa(change) => vec![EffectPacket::nuo_di_ka_channel(*change)],
+        BattleChange::Conduit(_) => project_conduit(change)?,
+        BattleChange::Card(_) | BattleChange::CardStateSnapshot(_) => {
+            project_card(change, redeal_layout)?
+        }
+        BattleChange::Field(_) => project_field(change)?,
+        BattleChange::Summon(_)
+        | BattleChange::Entity(_)
+        | BattleChange::ToughnessReset(_)
+        | BattleChange::ToughnessRecovered(_)
+        | BattleChange::Upgrade(_)
+        | BattleChange::UpgradeApplied(_)
+        | BattleChange::EntityPromotion(_)
+        | BattleChange::MoveFront(_)
+        | BattleChange::WaveAdvanced(_) => project_roster(change)?,
+    })
+}
+
+fn project_buff_and_marker(change: &BattleChange) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
         BattleChange::SkillLifecycle(
             crate::engine::skill::action::SkillLifecycle::DirectUltimateBodyCompleted {
                 source_uid,
@@ -425,142 +471,16 @@ fn project_change(
                 marker.team_type,
             )]
         }
-        BattleChange::Hp(changes) => {
-            if let Some(config_effect) = changes.kill {
-                return Ok(vec![EffectPacket::kill(changes.target_uid, config_effect)]);
-            }
-            let mut effects = Vec::new();
-            // A shared hit lands after its stack update and every ally's share.
-            if let Some(shared) = &changes.shared_hurt {
-                effects.extend(EffectPacket::recorded_buff_changes(&shared.consumed));
-                for share in &shared.shares {
-                    effects.extend(project_change(
-                        &BattleChange::Hp(Box::new(share.clone())),
-                        writes_reduce_hp,
-                        hurt_info_layout,
-                        absorb_map_layout,
-                        redeal_layout,
-                    )?);
-                }
-            }
-            if let Some(shield) = changes
-                .shield_absorbed
-                .filter(|_| hurt_info_layout == HurtInfoWireLayout::Version6)
-            {
-                effects.push(EffectPacket::shield(
-                    shield.target_uid,
-                    shield.after,
-                    changes
-                        .damage
-                        .map(|damage| damage.hurt.hurt_effect_type)
-                        .unwrap_or_default(),
-                ));
-            }
-            if let Some(shield) = changes.shield_granted {
-                effects.push(EffectPacket::shield_value_change(
-                    shield.target_uid,
-                    shield.added,
-                ));
-            }
-            if let Some(hp) = changes.hp {
-                let hp = apply_hp_wire_layout(hp, writes_reduce_hp);
-                let mut effect = hp
-                    .hurt
-                    .filter(|hurt| {
-                        hurt.damage_from == crate::engine::manager::hp::HurtDamageFromType::Buff
-                    })
-                    .map(|hurt| {
-                        EffectPacket::damage_by_buff_act_with_hurt_info_layout(
-                            hp,
-                            hurt.buff_act_id,
-                            hurt_info_layout,
-                            absorb_map_layout,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        EffectPacket::hp_with_hurt_info_and_toughness_layout(
-                            hp,
-                            changes.toughness,
-                            hurt_info_layout,
-                            absorb_map_layout,
-                        )
-                    });
-                apply_absorbed_shield_wire(
-                    &mut effect,
-                    changes.fake_hp_consumed,
-                    changes.team_shared_shield_absorbed,
-                    changes.shield_absorbed,
-                    hurt_info_layout,
-                    absorb_map_layout,
-                );
-                effects.push(effect);
-            } else if let Some(damage) = changes.damage {
-                let mut effect = EffectPacket::fully_absorbed_damage_with_toughness_layout(
-                    changes.target_uid,
-                    damage,
-                    changes.toughness,
-                    hurt_info_layout,
-                    absorb_map_layout,
-                );
-                apply_absorbed_shield_wire(
-                    &mut effect,
-                    changes.fake_hp_consumed,
-                    changes.team_shared_shield_absorbed,
-                    changes.shield_absorbed,
-                    hurt_info_layout,
-                    absorb_map_layout,
-                );
-                effects.push(effect);
-            }
-            if let Some(removed) = &changes.team_shared_shield_removed {
-                effects.extend(EffectPacket::recorded_buff_changes(removed));
-            }
-            if let Some(max_hp) = changes.max_hp {
-                let wire = (changes.origin.domain
-                    == crate::engine::skill::rule::RuleDomain::BuffAct)
-                    .then(|| {
-                        crate::engine::skill::buff_act::wire::find(
-                            changes.origin.key.opcode,
-                            changes.origin.key.type_name,
-                        )
-                        .and_then(|definition| definition.max_hp)
-                    })
-                    .flatten();
-                let plan = wire.map_or(
-                    crate::engine::skill::buff_act::wire::MaxHpWirePlan {
-                        max_hp_repeats: 1,
-                        current_hp_repeats: 1,
-                        buff_act_id: 0,
-                    },
-                    |rule| {
-                        rule.plan(
-                            changes.source_uid,
-                            changes.target_uid,
-                            max_hp.before_current,
-                            max_hp.after_current,
-                            max_hp.delta,
-                        )
-                    },
-                );
-                for index in 0..plan.max_hp_repeats {
-                    effects.push(EffectPacket::max_hp_change(
-                        max_hp.target_uid,
-                        max_hp.after_max,
-                        plan.buff_act_id,
-                    ));
-                    if index < plan.current_hp_repeats {
-                        effects.push(EffectPacket::current_hp_change(
-                            max_hp.target_uid,
-                            max_hp.after_current,
-                        ));
-                    }
-                }
-            }
-            if let Some(death) = changes.death {
-                effects.push(EffectPacket::dead(death.transition().target_uid));
-            }
-            effects
-        }
+        _ => unreachable!("project_buff_and_marker is only called for buff and marker changes"),
+    })
+}
+
+fn project_resource(
+    change: &BattleChange,
+    hurt_info_layout: HurtInfoWireLayout,
+    absorb_map_layout: AbsorbHurtMapLayout,
+) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
         BattleChange::Death(death) => vec![EffectPacket::dead(death.target_uid)],
         BattleChange::NuoDiKaHit(hit) => vec![EffectPacket::nuo_di_ka_hit(*hit)],
         BattleChange::Injury(change) => {
@@ -654,6 +574,133 @@ fn project_change(
             )]
         }
         BattleChange::Eureka(_) => Vec::new(),
+        _ => unreachable!("project_resource is only called for resource changes"),
+    })
+}
+
+fn project_roster(change: &BattleChange) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
+        BattleChange::Summon(changes) => {
+            let applied = |level| SummonApplyResult {
+                target_uid: changes.target_uid,
+                summoned_id: changes.summoned_id,
+                level,
+                uid: summoned_lane(changes.summoned_id) as i64,
+                from_uid: changes.owner_uid,
+            };
+            match changes.operation {
+                SummonOperation::Add { .. } if changes.before.is_none() => changes
+                    .after
+                    .map(|state| EffectPacket::summoned_add(&applied(state.level)))
+                    .into_iter()
+                    .collect(),
+                SummonOperation::ChangeLevel { level } if changes.before != changes.after => {
+                    vec![EffectPacket::summoned_level_up(
+                        &applied(changes.after.map(|state| state.level).unwrap_or_default()),
+                        level,
+                        changes.origin.key.opcode,
+                    )]
+                }
+                SummonOperation::AddLevel { delta } if changes.before != changes.after => {
+                    vec![EffectPacket::summoned_level_up(
+                        &applied(changes.after.map(|state| state.level).unwrap_or_default()),
+                        delta,
+                        changes.origin.key.opcode,
+                    )]
+                }
+                SummonOperation::Remove { count } if changes.before != changes.after => {
+                    vec![EffectPacket::summoned_delete(
+                        changes.owner_uid,
+                        changes.summoned_id,
+                        count,
+                        changes.origin.key.opcode,
+                    )]
+                }
+                SummonOperation::ChangeLevel { .. }
+                | SummonOperation::AddLevel { .. }
+                | SummonOperation::Remove { .. }
+                | SummonOperation::Add { .. } => Vec::new(),
+            }
+        }
+        BattleChange::Entity(changes) => match changes.operation {
+            crate::engine::manager::entity::EntityOperation::SummonCombatant { .. }
+            | crate::engine::manager::entity::EntityOperation::SummonSpecial { .. } => {
+                vec![EffectPacket::monster_summon(
+                    changes.target_uid,
+                    changes.entity.clone(),
+                    changes.origin.key.opcode,
+                )]
+            }
+            crate::engine::manager::entity::EntityOperation::Transform { .. } => {
+                vec![EffectPacket::monster_change(
+                    changes.entity.clone(),
+                    changes.origin.key.opcode,
+                )]
+            }
+            crate::engine::manager::entity::EntityOperation::ChangeCareer { career } => {
+                vec![EffectPacket::career_change(
+                    changes.target_uid,
+                    career,
+                    changes.origin.key.opcode,
+                )]
+            }
+        },
+        BattleChange::ToughnessReset(change) => {
+            vec![EffectPacket::toughness_reset(*change)]
+        }
+        BattleChange::ToughnessRecovered(change) => {
+            vec![EffectPacket::toughness_recover(*change)]
+        }
+        BattleChange::Upgrade(change)
+            if matches!(change.operation, UpgradeOperation::Offer { .. }) =>
+        {
+            let UpgradeOperation::Offer { origin, upgrade_id } = change.operation else {
+                unreachable!()
+            };
+            vec![EffectPacket::notify_upgrade_hero(
+                change.owner_uid,
+                upgrade_id,
+                origin.key.opcode,
+            )]
+        }
+        BattleChange::Upgrade(_) => return Err(ProjectionError::Upgrade),
+        BattleChange::UpgradeApplied(applied) => {
+            let option_id = applied
+                .change
+                .selected_after
+                .ok_or(ProjectionError::Upgrade)?;
+            let mut effects = vec![EffectPacket::hero_upgrade(
+                applied.change.owner_uid,
+                option_id,
+                applied.entity.clone(),
+            )];
+            effects.extend(
+                applied
+                    .buff_changes
+                    .iter()
+                    .flat_map(EffectPacket::recorded_buff_changes),
+            );
+            effects.push(CardPacket::cards_push(
+                applied.card_changes.after.clone(),
+                1,
+            ));
+            effects
+        }
+        BattleChange::EntityPromotion(promotion) => vec![EffectPacket::change_hero(
+            promotion.defeated_uid,
+            promotion.position,
+            promotion.entering.clone(),
+        )],
+        BattleChange::MoveFront(changes) => vec![EffectPacket::move_front(changes)],
+        BattleChange::WaveAdvanced(change) => {
+            vec![EffectPacket::new_change_wave(change.fight.clone())]
+        }
+        _ => unreachable!("project_roster is only called for roster changes"),
+    })
+}
+
+fn project_gauge(change: &BattleChange) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
         BattleChange::Gauge(change)
             if change.key.kind == GaugeKind::TeamEnergy
                 && matches!(change.key.owner, GaugeOwner::Team(_)) =>
@@ -740,7 +787,12 @@ fn project_change(
             }
         }
         BattleChange::Gauge(change) => return Err(ProjectionError::Gauge(change.key.kind)),
-        BattleChange::NuoDiKa(change) => vec![EffectPacket::nuo_di_ka_channel(*change)],
+        _ => unreachable!("project_gauge is only called for gauge and emitter changes"),
+    })
+}
+
+fn project_conduit(change: &BattleChange) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
         BattleChange::Conduit(crate::engine::manager::conduit::ConduitChange::Initialized(
             area,
         ))
@@ -869,6 +921,15 @@ fn project_change(
         BattleChange::Conduit(
             crate::engine::manager::conduit::ConduitChange::DeviceRestarted { source_uid, team },
         ) => vec![EffectPacket::conduit_device_restarted(*source_uid, *team)],
+        _ => unreachable!("project_conduit is only called for conduit changes"),
+    })
+}
+
+fn project_card(
+    change: &BattleChange,
+    redeal_layout: RedealWireLayout,
+) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
         BattleChange::Card(changes)
             if matches!(
                 changes.kind,
@@ -1307,6 +1368,12 @@ fn project_change(
             .into_iter()
             .collect(),
         BattleChange::Card(changes) => return Err(ProjectionError::Card(changes.kind)),
+        _ => unreachable!("project_card is only called for card changes"),
+    })
+}
+
+fn project_field(change: &BattleChange) -> Result<Vec<ActEffect>, ProjectionError> {
+    Ok(match change {
         BattleChange::Field(change) if change.before == change.after => Vec::new(),
         BattleChange::Field(change)
             if matches!(
@@ -1347,122 +1414,146 @@ fn project_change(
             vec![effect]
         }
         BattleChange::Field(change) => return Err(ProjectionError::Field(change.kind)),
-        BattleChange::Summon(changes) => {
-            let applied = |level| SummonApplyResult {
-                target_uid: changes.target_uid,
-                summoned_id: changes.summoned_id,
-                level,
-                uid: summoned_lane(changes.summoned_id) as i64,
-                from_uid: changes.owner_uid,
-            };
-            match changes.operation {
-                SummonOperation::Add { .. } if changes.before.is_none() => changes
-                    .after
-                    .map(|state| EffectPacket::summoned_add(&applied(state.level)))
-                    .into_iter()
-                    .collect(),
-                SummonOperation::ChangeLevel { level } if changes.before != changes.after => {
-                    vec![EffectPacket::summoned_level_up(
-                        &applied(changes.after.map(|state| state.level).unwrap_or_default()),
-                        level,
-                        changes.origin.key.opcode,
-                    )]
-                }
-                SummonOperation::AddLevel { delta } if changes.before != changes.after => {
-                    vec![EffectPacket::summoned_level_up(
-                        &applied(changes.after.map(|state| state.level).unwrap_or_default()),
-                        delta,
-                        changes.origin.key.opcode,
-                    )]
-                }
-                SummonOperation::Remove { count } if changes.before != changes.after => {
-                    vec![EffectPacket::summoned_delete(
-                        changes.owner_uid,
-                        changes.summoned_id,
-                        count,
-                        changes.origin.key.opcode,
-                    )]
-                }
-                SummonOperation::ChangeLevel { .. }
-                | SummonOperation::AddLevel { .. }
-                | SummonOperation::Remove { .. }
-                | SummonOperation::Add { .. } => Vec::new(),
-            }
-        }
-        BattleChange::Entity(changes) => match changes.operation {
-            crate::engine::manager::entity::EntityOperation::SummonCombatant { .. }
-            | crate::engine::manager::entity::EntityOperation::SummonSpecial { .. } => {
-                vec![EffectPacket::monster_summon(
-                    changes.target_uid,
-                    changes.entity.clone(),
-                    changes.origin.key.opcode,
-                )]
-            }
-            crate::engine::manager::entity::EntityOperation::Transform { .. } => {
-                vec![EffectPacket::monster_change(
-                    changes.entity.clone(),
-                    changes.origin.key.opcode,
-                )]
-            }
-            crate::engine::manager::entity::EntityOperation::ChangeCareer { career } => {
-                vec![EffectPacket::career_change(
-                    changes.target_uid,
-                    career,
-                    changes.origin.key.opcode,
-                )]
-            }
-        },
-        BattleChange::MoveFront(changes) => vec![EffectPacket::move_front(changes)],
-        BattleChange::ToughnessReset(change) => {
-            vec![EffectPacket::toughness_reset(*change)]
-        }
-        BattleChange::ToughnessRecovered(change) => {
-            vec![EffectPacket::toughness_recover(*change)]
-        }
-        BattleChange::Upgrade(change)
-            if matches!(change.operation, UpgradeOperation::Offer { .. }) =>
-        {
-            let UpgradeOperation::Offer { origin, upgrade_id } = change.operation else {
-                unreachable!()
-            };
-            vec![EffectPacket::notify_upgrade_hero(
-                change.owner_uid,
-                upgrade_id,
-                origin.key.opcode,
-            )]
-        }
-        BattleChange::Upgrade(_) => return Err(ProjectionError::Upgrade),
-        BattleChange::UpgradeApplied(applied) => {
-            let option_id = applied
-                .change
-                .selected_after
-                .ok_or(ProjectionError::Upgrade)?;
-            let mut effects = vec![EffectPacket::hero_upgrade(
-                applied.change.owner_uid,
-                option_id,
-                applied.entity.clone(),
-            )];
-            effects.extend(
-                applied
-                    .buff_changes
-                    .iter()
-                    .flat_map(EffectPacket::recorded_buff_changes),
-            );
-            effects.push(CardPacket::cards_push(
-                applied.card_changes.after.clone(),
-                1,
-            ));
-            effects
-        }
-        BattleChange::EntityPromotion(promotion) => vec![EffectPacket::change_hero(
-            promotion.defeated_uid,
-            promotion.position,
-            promotion.entering.clone(),
-        )],
-        BattleChange::WaveAdvanced(change) => {
-            vec![EffectPacket::new_change_wave(change.fight.clone())]
-        }
+        _ => unreachable!("project_field is only called for field changes"),
     })
+}
+
+fn project_hp(
+    changes: &crate::engine::manager::hp::HpChanges,
+    writes_reduce_hp: bool,
+    hurt_info_layout: HurtInfoWireLayout,
+    absorb_map_layout: AbsorbHurtMapLayout,
+) -> Result<Vec<ActEffect>, ProjectionError> {
+    if let Some(config_effect) = changes.kill {
+        return Ok(vec![EffectPacket::kill(changes.target_uid, config_effect)]);
+    }
+    let mut effects = Vec::new();
+    // A shared hit lands after its stack update and every ally's share.
+    if let Some(shared) = &changes.shared_hurt {
+        effects.extend(EffectPacket::recorded_buff_changes(&shared.consumed));
+        for share in &shared.shares {
+            effects.extend(project_hp(
+                share,
+                writes_reduce_hp,
+                hurt_info_layout,
+                absorb_map_layout,
+            )?);
+        }
+    }
+    if let Some(shield) = changes
+        .shield_absorbed
+        .filter(|_| hurt_info_layout == HurtInfoWireLayout::Version6)
+    {
+        effects.push(EffectPacket::shield(
+            shield.target_uid,
+            shield.after,
+            changes
+                .damage
+                .map(|damage| damage.hurt.hurt_effect_type)
+                .unwrap_or_default(),
+        ));
+    }
+    if let Some(shield) = changes.shield_granted {
+        effects.push(EffectPacket::shield_value_change(
+            shield.target_uid,
+            shield.added,
+        ));
+    }
+    if let Some(hp) = changes.hp {
+        let hp = apply_hp_wire_layout(hp, writes_reduce_hp);
+        let mut effect = hp
+            .hurt
+            .filter(|hurt| hurt.damage_from == crate::engine::manager::hp::HurtDamageFromType::Buff)
+            .map(|hurt| {
+                EffectPacket::damage_by_buff_act_with_hurt_info_layout(
+                    hp,
+                    hurt.buff_act_id,
+                    hurt_info_layout,
+                    absorb_map_layout,
+                )
+            })
+            .unwrap_or_else(|| {
+                EffectPacket::hp_with_hurt_info_and_toughness_layout(
+                    hp,
+                    changes.toughness,
+                    hurt_info_layout,
+                    absorb_map_layout,
+                )
+            });
+        apply_absorbed_shield_wire(
+            &mut effect,
+            changes.fake_hp_consumed,
+            changes.team_shared_shield_absorbed,
+            changes.shield_absorbed,
+            hurt_info_layout,
+            absorb_map_layout,
+        );
+        effects.push(effect);
+    } else if let Some(damage) = changes.damage {
+        let mut effect = EffectPacket::fully_absorbed_damage_with_toughness_layout(
+            changes.target_uid,
+            damage,
+            changes.toughness,
+            hurt_info_layout,
+            absorb_map_layout,
+        );
+        apply_absorbed_shield_wire(
+            &mut effect,
+            changes.fake_hp_consumed,
+            changes.team_shared_shield_absorbed,
+            changes.shield_absorbed,
+            hurt_info_layout,
+            absorb_map_layout,
+        );
+        effects.push(effect);
+    }
+    if let Some(removed) = &changes.team_shared_shield_removed {
+        effects.extend(EffectPacket::recorded_buff_changes(removed));
+    }
+    if let Some(max_hp) = changes.max_hp {
+        let wire = (changes.origin.domain == crate::engine::skill::rule::RuleDomain::BuffAct)
+            .then(|| {
+                crate::engine::skill::buff_act::wire::find(
+                    changes.origin.key.opcode,
+                    changes.origin.key.type_name,
+                )
+                .and_then(|definition| definition.max_hp)
+            })
+            .flatten();
+        let plan = wire.map_or(
+            crate::engine::skill::buff_act::wire::MaxHpWirePlan {
+                max_hp_repeats: 1,
+                current_hp_repeats: 1,
+                buff_act_id: 0,
+            },
+            |rule| {
+                rule.plan(
+                    changes.source_uid,
+                    changes.target_uid,
+                    max_hp.before_current,
+                    max_hp.after_current,
+                    max_hp.delta,
+                )
+            },
+        );
+        for index in 0..plan.max_hp_repeats {
+            effects.push(EffectPacket::max_hp_change(
+                max_hp.target_uid,
+                max_hp.after_max,
+                plan.buff_act_id,
+            ));
+            if index < plan.current_hp_repeats {
+                effects.push(EffectPacket::current_hp_change(
+                    max_hp.target_uid,
+                    max_hp.after_current,
+                ));
+            }
+        }
+    }
+    if let Some(death) = changes.death {
+        effects.push(EffectPacket::dead(death.transition().target_uid));
+    }
+    Ok(effects)
 }
 
 fn apply_absorbed_shield_wire(
