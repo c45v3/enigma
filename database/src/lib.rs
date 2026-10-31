@@ -1,4 +1,8 @@
-use sqlx::{Connection, Row, SqliteConnection, migrate, migrate::MigrateError};
+use sqlx::{
+    Connection, Row, SqliteConnection,
+    migrate::{MigrateError, Migrator},
+    sqlite::SqliteConnectOptions,
+};
 
 use std::{collections::HashMap, path::Path};
 
@@ -17,18 +21,39 @@ pub async fn connect_to(settings: &DatabaseSettings) -> sqlx::Result<SqlitePool>
     SqlitePool::connect(&settings.to_string()).await
 }
 
-pub async fn run_migrations(pool: &SqlitePool) -> Result<(), migrate::MigrateError> {
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+pub async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
     info!("Running database migrations...");
-    migrate!("./migrations").run(pool).await?;
+    MIGRATOR.run(pool).await?;
     info!("Migrations completed successfully");
     Ok(())
 }
 
-/// Runs migrations, and if a checksum mismatch is detected (because a migration file was edited
-/// in-place), backs up all user data, recreates the DB from scratch, and restores the data.
+fn latest_known_migration() -> i64 {
+    MIGRATOR.iter().map(|m| m.version).max().unwrap_or(0)
+}
+
+/// Runs migrations. A database whose applied schema is newer than this build's newest migration
+/// is refused untouched. If a migration was edited in place (checksum mismatch) or removed, all
+/// user data is dumped and the schema is rebuilt in `<db>.rescue`; that file is swapped over the
+/// live DB only after the restore commits, with the original copied to `<db>.bak` first, so an
+/// interruption at any point leaves either the original or the fully restored DB in place.
 /// New columns introduced by the edited migration get their DEFAULT values automatically.
 pub async fn migrate_or_rescue(settings: &DatabaseSettings) -> anyhow::Result<SqlitePool> {
+    let db_path = settings.db_name.as_str();
+    let bak_path = format!("{db_path}.bak");
+    let staging_path = format!("{db_path}.rescue");
+
+    discard_sqlite_files(&staging_path)
+        .map_err(|e| anyhow::anyhow!("Failed to remove leftover {staging_path}: {e}"))?;
+    recover_interrupted_legacy_rescue(db_path, &bak_path).await?;
+
     let pool = connect_to(settings).await?;
+    if let Err(error) = ensure_schema_not_newer(&pool, db_path).await {
+        pool.close().await;
+        return Err(error);
+    }
 
     match run_migrations(&pool).await {
         Ok(()) => return Ok(pool),
@@ -44,48 +69,163 @@ pub async fn migrate_or_rescue(settings: &DatabaseSettings) -> anyhow::Result<Sq
     let backup = dump_all_tables(&pool).await?;
     pool.close().await;
 
-    let bak_path = format!("{}.bak", settings.db_name);
-    std::fs::rename(&settings.db_name, &bak_path)
-        .map_err(|e| anyhow::anyhow!("Failed to rename DB to .bak: {e}"))?;
-    info!("Old DB saved as {bak_path}, recreating schema...");
-
-    let pool = reinstate_on_error(
-        connect_to(settings).await.map_err(anyhow::Error::from),
-        &settings.db_name,
-        &bak_path,
-    )?;
+    info!("Rebuilding schema in {staging_path}...");
+    let staging_pool = match connect_to(&DatabaseSettings {
+        db_name: staging_path.clone(),
+    })
+    .await
+    {
+        Ok(pool) => pool,
+        Err(error) => return Err(discard_staging_on_error(error.into(), &staging_path)),
+    };
     let rescue_result: anyhow::Result<()> = async {
-        run_migrations(&pool).await?;
-        restore_all_tables(&pool, backup).await
+        run_migrations(&staging_pool).await?;
+        restore_all_tables(&staging_pool, backup).await
     }
     .await;
+    staging_pool.close().await;
     if let Err(error) = rescue_result {
-        pool.close().await;
-        return reinstate_on_error(Err(error), &settings.db_name, &bak_path);
+        return Err(discard_staging_on_error(error, &staging_path));
     }
-    info!("DB rescue complete");
 
+    let backed_up =
+        std::fs::copy(db_path, &bak_path).and_then(|_| std::fs::File::open(&bak_path)?.sync_all());
+    if let Err(e) = backed_up {
+        return Err(discard_staging_on_error(
+            anyhow::anyhow!("Failed to back up DB to {bak_path}: {e}"),
+            &staging_path,
+        ));
+    }
+
+    if let Err(e) = std::fs::rename(&staging_path, db_path) {
+        return Err(discard_staging_on_error(
+            anyhow::anyhow!("Failed to swap rescued DB into place: {e}"),
+            &staging_path,
+        ));
+    }
+
+    let pool = connect_to(settings).await?;
+    info!("DB rescue complete; previous DB saved as {bak_path}");
     Ok(pool)
 }
 
-fn reinstate_backup(db_path: &str, bak_path: &str) -> std::io::Result<()> {
-    if Path::new(db_path).exists() {
-        std::fs::remove_file(db_path)?;
+async fn ensure_schema_not_newer(pool: &SqlitePool, db_path: &str) -> anyhow::Result<()> {
+    let has_migrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_migrations == 0 {
+        return Ok(());
     }
-    std::fs::rename(bak_path, db_path)
+
+    let applied: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(pool)
+        .await?;
+    let latest = latest_known_migration();
+    if let Some(applied) = applied
+        && applied > latest
+    {
+        anyhow::bail!(
+            "Database {db_path} was migrated by a newer build (schema version {applied}, this build knows up to {latest}); refusing to start so the data isn't rewritten. Run a build that includes migration {applied}."
+        );
+    }
+    Ok(())
 }
 
-fn reinstate_on_error<T>(
-    result: anyhow::Result<T>,
-    db_path: &str,
-    bak_path: &str,
-) -> anyhow::Result<T> {
-    result.map_err(|error| match reinstate_backup(db_path, bak_path) {
+/// Older builds renamed the live DB to `.bak` before rebuilding it, so an interrupted rescue
+/// left an empty DB next to a `.bak` holding the real data. Put that backup back.
+async fn recover_interrupted_legacy_rescue(db_path: &str, bak_path: &str) -> anyhow::Result<()> {
+    if !Path::new(bak_path).exists() {
+        return Ok(());
+    }
+    if user_count(db_path, false).await? > 0 {
+        return Ok(());
+    }
+    match user_count(bak_path, true).await {
+        Ok(0) => return Ok(()),
+        Ok(_) => {}
+        Err(error) => {
+            warn!("Ignoring unreadable {bak_path}: {error}");
+            return Ok(());
+        }
+    }
+
+    let interrupted_path = format!("{db_path}.interrupted");
+    warn!(
+        "{db_path} has no users but {bak_path} does; reinstating the backup left by an interrupted rescue (empty DB kept as {interrupted_path})"
+    );
+    discard_sqlite_files(&interrupted_path)?;
+    move_sqlite_files(db_path, &interrupted_path)?;
+    move_sqlite_files(bak_path, db_path)?;
+    Ok(())
+}
+
+async fn user_count(path: &str, read_only: bool) -> anyhow::Result<i64> {
+    if !Path::new(path).exists() {
+        return Ok(0);
+    }
+    let mut conn = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(path)
+            .read_only(read_only),
+    )
+    .await?;
+    let count: anyhow::Result<i64> = async {
+        let has_users: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'users'",
+        )
+        .fetch_one(&mut conn)
+        .await?;
+        if has_users == 0 {
+            return Ok(0);
+        }
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&mut conn)
+            .await?)
+    }
+    .await;
+    conn.close().await?;
+    count
+}
+
+fn sqlite_files(path: &str) -> [String; 4] {
+    [
+        path.to_string(),
+        format!("{path}-journal"),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+    ]
+}
+
+fn discard_sqlite_files(path: &str) -> std::io::Result<()> {
+    for file in sqlite_files(path) {
+        match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Moves a DB together with its journal/WAL sidecars: a hot journal left next to a different
+/// DB file would be rolled back into it.
+fn move_sqlite_files(from: &str, to: &str) -> std::io::Result<()> {
+    for (source, target) in sqlite_files(from).iter().zip(sqlite_files(to).iter()) {
+        if Path::new(source).exists() {
+            std::fs::rename(source, target)?;
+        }
+    }
+    Ok(())
+}
+
+fn discard_staging_on_error(error: anyhow::Error, staging_path: &str) -> anyhow::Error {
+    match discard_sqlite_files(staging_path) {
         Ok(()) => error,
-        Err(restore_error) => anyhow::anyhow!(
-            "DB rescue failed: {error}; failed to reinstate {bak_path}: {restore_error}"
+        Err(discard_error) => anyhow::anyhow!(
+            "DB rescue failed: {error}; failed to remove {staging_path}: {discard_error}"
         ),
-    })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -650,34 +790,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn recreate_failure_reinstates_the_backup() {
-        let name = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("enigma-db-open-failure-{name}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("sonetto.db");
-        let bak_path = dir.join("sonetto.db.bak");
-        std::fs::write(&db_path, b"partial replacement").unwrap();
-        std::fs::write(&bak_path, b"original database").unwrap();
-
-        assert!(
-            reinstate_on_error::<()>(
-                Err(anyhow::anyhow!("replacement open failed")),
-                db_path.to_str().unwrap(),
-                bak_path.to_str().unwrap(),
-            )
-            .is_err()
-        );
-        assert_eq!(std::fs::read(&db_path).unwrap(), b"original database");
-        assert!(!bak_path.exists());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
     #[tokio::test]
-    async fn failed_rescue_reinstates_the_original_database() {
+    async fn failed_rescue_leaves_the_original_database_untouched() {
         let name = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -715,6 +829,153 @@ mod tests {
         );
         restored.close().await;
         assert!(!Path::new(&format!("{}.bak", settings.db_name)).exists());
+        assert!(!Path::new(&format!("{}.rescue", settings.db_name)).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn temp_db(label: &str) -> (std::path::PathBuf, DatabaseSettings) {
+        let name = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("enigma-db-{label}-{name}"));
+        let settings = DatabaseSettings {
+            db_name: dir.join("sonetto.db").to_string_lossy().to_string(),
+        };
+        (dir, settings)
+    }
+
+    async fn migrated_db(settings: &DatabaseSettings, with_user: bool) -> SqlitePool {
+        let pool = connect_to(settings).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        if with_user {
+            sqlx::query(
+                "INSERT INTO users (id, username, created_at, updated_at) VALUES (1, 'alice', 0, 0)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    async fn username(pool: &SqlitePool) -> String {
+        sqlx::query_scalar("SELECT username FROM users WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn newer_schema_is_refused_without_touching_files() {
+        let (dir, settings) = temp_db("newer-schema");
+        let pool = migrated_db(&settings, false).await;
+        let future = latest_known_migration() + 1;
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, 'future', 1, X'00', 0)",
+        )
+        .bind(future)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let error = migrate_or_rescue(&settings).await.unwrap_err();
+        assert!(error.to_string().contains("migrated by a newer build"));
+
+        let pool = connect_to(&settings).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
+                .bind(future)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        pool.close().await;
+        assert!(!Path::new(&format!("{}.bak", settings.db_name)).exists());
+        assert!(!Path::new(&format!("{}.rescue", settings.db_name)).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_rescue_swaps_in_rebuilt_database_and_keeps_backup() {
+        let (dir, settings) = temp_db("rescue-success");
+        let pool = migrated_db(&settings, true).await;
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = (SELECT MIN(version) FROM _sqlx_migrations)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = migrate_or_rescue(&settings).await.unwrap();
+        assert_eq!(username(&pool).await, "alice");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE checksum = X'00'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        pool.close().await;
+
+        let bak = connect_to(&DatabaseSettings {
+            db_name: format!("{}.bak", settings.db_name),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE checksum = X'00'"
+            )
+            .fetch_one(&bak)
+            .await
+            .unwrap(),
+            1
+        );
+        bak.close().await;
+        assert!(!Path::new(&format!("{}.rescue", settings.db_name)).exists());
+
+        let pool = migrate_or_rescue(&settings).await.unwrap();
+        assert_eq!(username(&pool).await, "alice");
+        pool.close().await;
+        assert!(Path::new(&format!("{}.bak", settings.db_name)).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn leftover_staging_file_is_discarded() {
+        let (dir, settings) = temp_db("rescue-leftover");
+        migrated_db(&settings, true).await.close().await;
+        let staging = format!("{}.rescue", settings.db_name);
+        let staging_journal = format!("{staging}-journal");
+        std::fs::write(&staging, b"garbage").unwrap();
+        std::fs::write(&staging_journal, b"garbage").unwrap();
+
+        let pool = migrate_or_rescue(&settings).await.unwrap();
+        assert_eq!(username(&pool).await, "alice");
+        pool.close().await;
+        assert!(!Path::new(&staging).exists());
+        assert!(!Path::new(&staging_journal).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_interrupted_rescue_is_reinstated() {
+        let (dir, settings) = temp_db("rescue-legacy");
+        let bak_settings = DatabaseSettings {
+            db_name: format!("{}.bak", settings.db_name),
+        };
+        migrated_db(&bak_settings, true).await.close().await;
+        migrated_db(&settings, false).await.close().await;
+
+        let pool = migrate_or_rescue(&settings).await.unwrap();
+        assert_eq!(username(&pool).await, "alice");
+        pool.close().await;
+        assert!(!Path::new(&bak_settings.db_name).exists());
+        assert!(Path::new(&format!("{}.interrupted", settings.db_name)).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
