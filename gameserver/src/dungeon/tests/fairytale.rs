@@ -25,6 +25,19 @@ async fn test_pool(user_id: i64) -> SqlitePool {
     pool
 }
 
+fn has_bonus(
+    bonus: &[sonettobuf::MaterialData],
+    materil_type: u32,
+    materil_id: u32,
+    quantity: i32,
+) -> bool {
+    bonus.iter().any(|m| {
+        m.materil_type == Some(materil_type)
+            && m.materil_id == Some(materil_id)
+            && m.quantity == Some(quantity)
+    })
+}
+
 #[tokio::test]
 async fn story_first_clear_completes_fairytale_in_same_transaction_and_grants_rewards() {
     let pool = test_pool(101).await;
@@ -83,6 +96,7 @@ async fn story_first_clear_completes_fairytale_in_same_transaction_and_grants_re
 
     let ft_update = settlement
         .fairytale_dungeon_update
+        .as_ref()
         .expect("fairytale_dungeon_update must be present on first clear");
     assert_eq!(
         ft_update.dungeon_info.as_ref().and_then(|d| d.episode_id),
@@ -92,6 +106,11 @@ async fn story_first_clear_completes_fairytale_in_same_transaction_and_grants_re
         ft_update.dungeon_info.as_ref().and_then(|d| d.star),
         Some(2)
     );
+
+    // The settlement screen must list the fairytale first-clear rewards next to the story rewards
+    assert!(has_bonus(&settlement.end_dungeon.first_bonus, 1, 110202, 3));
+    assert!(has_bonus(&settlement.end_dungeon.first_bonus, 2, 2, 20));
+    assert!(has_bonus(&settlement.end_dungeon.advenced_bonus, 2, 2, 60));
 
     tx.commit().await.unwrap();
 
@@ -175,6 +194,12 @@ async fn story_repeat_clear_does_not_re_reward_or_re_clear_fairytale() {
 
     // Fairytale update must NOT be present on repeat clear
     assert!(settlement2.fairytale_dungeon_update.is_none());
+    assert!(!has_bonus(
+        &settlement2.end_dungeon.first_bonus,
+        1,
+        110202,
+        3
+    ));
     tx2.commit().await.unwrap();
 
     // Currencies and items must not increase on repeat clear
@@ -254,6 +279,13 @@ async fn story_first_clear_when_fairytale_already_cleared_does_not_duplicate_fai
 
     // Since fairytale was already cleared, fairytale_dungeon_update is None
     assert!(settlement.fairytale_dungeon_update.is_none());
+    assert!(!has_bonus(
+        &settlement.end_dungeon.first_bonus,
+        1,
+        110202,
+        3
+    ));
+    assert!(!has_bonus(&settlement.end_dungeon.first_bonus, 2, 2, 20));
     tx_story.commit().await.unwrap();
 
     // Only story advanced bonus (60) should be granted, NOT fairytale first bonus (20)

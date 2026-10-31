@@ -252,7 +252,7 @@ pub(crate) async fn settle_completion_in_transaction(
     } else {
         Vec::new()
     };
-    let completion_rewards =
+    let mut completion_rewards =
         logic::dungeon::completion_rewards(episode, first_pass, previous_star, star, multiplier);
     let mut rewards = reward::RewardManager::new(player_id)
         .apply_dungeon_in_transaction(tx, completion_rewards.rewards)
@@ -276,6 +276,15 @@ pub(crate) async fn settle_completion_in_transaction(
                 )
                 .await?;
             let ft_completion = logic::dungeon::completion_rewards(ft_episode, true, 0, ft_star, 1);
+            completion_rewards
+                .first_bonus
+                .extend(ft_completion.first_bonus);
+            completion_rewards
+                .normal_bonus
+                .extend(ft_completion.normal_bonus);
+            completion_rewards
+                .advanced_bonus
+                .extend(ft_completion.advanced_bonus);
             let ft_applied = reward::RewardManager::new(player_id)
                 .apply_dungeon_in_transaction(tx, ft_completion.rewards)
                 .await?;
