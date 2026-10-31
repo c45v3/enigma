@@ -236,10 +236,7 @@ pub async fn on_get_dungeon(
     req: ClientPacket,
 ) -> Result<(), AppError> {
     let player_id = ctx.player()?.id;
-    let compensation = dungeon::compensate_fairytale_clears(ctx.state.db, player_id).await?;
-    if !compensation.compensated_episodes.is_empty() {
-        push::send_dungeon_completion_reward_pushes(ctx, player_id, compensation.rewards).await?;
-    }
+    dungeon::compensate_fairytale_clears(ctx.state.db, player_id).await?;
     let (reply, dungeons) = dungeon::dungeon_info(ctx.state.db, player_id).await?;
 
     ctx.send_reply(CmdId::GetDungeonCmd, reply, 0, req.up_tag)
@@ -336,29 +333,19 @@ pub async fn on_start_dungeon(
         None => dungeon::episode_battle_id(ctx.state.db, player_id, episode_cfg).await?,
     };
     if battle_id == 0 {
-        let settlement = dungeon::settle_battleless(
-            ctx.state.db,
-            player_id,
-            chapter_id,
-            episode_id,
-            dungeon::DungeonCompletion {
-                star: 1,
-                total_round: 0,
-                multiplier,
-                fight_group: None,
-            },
-            &Default::default(),
-        )
-        .await?;
-        push::send_cost_pushes(
-            ctx,
-            player_id,
-            settlement.cost.item_ids,
-            settlement.cost.currency_ids,
-        )
-        .await?;
+        match dungeon::begin_battleless(ctx.state.db, player_id, chapter_id, episode_id, multiplier)
+            .await?
+        {
+            dungeon::BattlelessStart::Resumed => {}
+            dungeon::BattlelessStart::Started { cost, refund } => {
+                if let Some(refund) = refund {
+                    push::send_applied_reward_pushes(ctx, player_id, refund, Vec::new(), None)
+                        .await?;
+                }
+                push::send_cost_pushes(ctx, player_id, cost.item_ids, cost.currency_ids).await?;
+            }
+        }
         ctx.player_mut()?.battle.clear_pending_record();
-        send_completed_dungeon(ctx, player_id, chapter_id, episode_id, settlement.dungeon).await?;
 
         return ctx
             .send_reply(
@@ -371,6 +358,12 @@ pub async fn on_start_dungeon(
                 req.up_tag,
             )
             .await;
+    }
+
+    if let Some(end) = dungeon::end_battleless(ctx.state.db, player_id, true).await? {
+        if let dungeon::BattlelessEnd::Refunded(refund) = end {
+            send_refund(ctx, player_id, refund).await?;
+        }
     }
 
     let mut active =
@@ -784,6 +777,21 @@ pub async fn on_dungeon_end_dungeon(
                     .await?;
             }
             push::send_end_fight_push(ctx, dungeon::completed_end_fight(active)).await?;
+        }
+    } else if let Some(end) =
+        dungeon::end_battleless(ctx.state.db, player_id, msg.is_abort.unwrap_or(false)).await?
+    {
+        match end {
+            dungeon::BattlelessEnd::Completed {
+                chapter_id,
+                episode_id,
+                settlement,
+            } => {
+                send_completed_dungeon(ctx, player_id, chapter_id, episode_id, settlement).await?;
+            }
+            dungeon::BattlelessEnd::Refunded(refund) => {
+                send_refund(ctx, player_id, refund).await?;
+            }
         }
     }
 

@@ -41,8 +41,7 @@ async fn seedless_record_does_not_block_its_first_replayable_replacement() {
     );
 }
 
-#[tokio::test]
-async fn battleless_settlement_rolls_back_its_entry_cost_on_failure() {
+async fn battleless_pool(user_id: i64) -> SqlitePool {
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -52,97 +51,159 @@ async fn battleless_settlement_rolls_back_its_entry_cost_on_failure() {
     database::run_migrations(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO users (id, username, created_at, updated_at)
-             VALUES (24, 'battleless', 0, 0)",
+             VALUES (?, 'battleless', 0, 0)",
     )
+    .bind(user_id)
     .execute(&pool)
     .await
     .unwrap();
-    database::db::starter_data::load_all_starter_data(&pool, 24)
+    database::db::starter_data::load_all_starter_data(&pool, user_id)
         .await
         .unwrap();
-    sqlx::query("UPDATE currencies SET quantity = 100 WHERE user_id = 24 AND currency_id = 4")
+    sqlx::query("UPDATE currencies SET quantity = 100 WHERE user_id = ? AND currency_id = 4")
+        .bind(user_id)
         .execute(&pool)
         .await
         .unwrap();
-    let episode = configs::get().episode.get(1000002).unwrap();
-    let currency_before: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM currencies WHERE user_id = 24 AND currency_id = 4",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    pool
+}
 
-    let result = settle_battleless(
-        &pool,
-        24,
-        -1,
-        episode.id,
-        DungeonCompletion {
-            star: 1,
-            total_round: 0,
-            multiplier: 1,
-            fight_group: None,
-        },
-        &Default::default(),
-    )
-    .await;
-
-    assert!(result.is_err());
-    let currency_after: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM currencies WHERE user_id = 24 AND currency_id = 4",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(currency_after, currency_before);
-
-    settle_battleless(
-        &pool,
-        24,
-        episode.chapter_id,
-        episode.id,
-        DungeonCompletion {
-            star: 1,
-            total_round: 0,
-            multiplier: 1,
-            fight_group: None,
-        },
-        &Default::default(),
-    )
-    .await
-    .unwrap();
-    let currency_after_commit: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM currencies WHERE user_id = 24 AND currency_id = 4",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(currency_after_commit, currency_before - 6);
-
-    assert!(
-        settle_battleless(
-            &pool,
-            24,
-            episode.chapter_id,
-            episode.id,
-            DungeonCompletion {
-                star: 1,
-                total_round: 0,
-                multiplier: 1,
-                fight_group: None,
-            },
-            &Default::default(),
-        )
+async fn currency_4(pool: &SqlitePool, user_id: i64) -> i32 {
+    sqlx::query_scalar("SELECT quantity FROM currencies WHERE user_id = ? AND currency_id = 4")
+        .bind(user_id)
+        .fetch_one(pool)
         .await
-        .is_err()
-    );
-    let currency_after_retry: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM currencies WHERE user_id = 24 AND currency_id = 4",
+        .unwrap()
+}
+
+async fn item_count(pool: &SqlitePool, user_id: i64, item_id: i32) -> i32 {
+    sqlx::query_scalar(
+        "SELECT COALESCE(MAX(quantity), 0) FROM items WHERE user_id = ? AND item_id = ?",
     )
-    .fetch_one(&pool)
+    .bind(user_id)
+    .bind(item_id)
+    .fetch_one(pool)
     .await
-    .unwrap();
-    assert_eq!(currency_after_retry, currency_after_commit);
+    .unwrap()
+}
+
+async fn pending_row(pool: &SqlitePool, user_id: i64) -> Option<(i32, i32, i32)> {
+    sqlx::query_as(
+        "SELECT chapter_id, episode_id, multiplier FROM user_pending_battleless WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn battleless_start_consumes_cost_without_completion() {
+    let pool = battleless_pool(24).await;
+
+    match begin_battleless(&pool, 24, 10000, 1000002, 1)
+        .await
+        .unwrap()
+    {
+        BattlelessStart::Started { cost, refund } => {
+            assert_eq!(cost.currency_ids, vec![(4, -6)]);
+            assert!(refund.is_none());
+        }
+        BattlelessStart::Resumed => panic!("expected a fresh battleless start"),
+    }
+
+    assert_eq!(currency_4(&pool, 24).await, 94);
+    assert_eq!(pending_row(&pool, 24).await, Some((10000, 1000002, 1)));
+    assert_eq!(dungeons::episode_star(&pool, 24, 1000002).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn battleless_end_settles_completion_and_rewards() {
+    let pool = battleless_pool(25).await;
+    begin_battleless(&pool, 25, 10000, 1000002, 1)
+        .await
+        .unwrap();
+
+    match end_battleless(&pool, 25, false).await.unwrap().unwrap() {
+        BattlelessEnd::Completed {
+            chapter_id,
+            episode_id,
+            ..
+        } => {
+            assert_eq!(chapter_id, 10000);
+            assert_eq!(episode_id, 1000002);
+        }
+        BattlelessEnd::Refunded(_) => panic!("expected completion"),
+    }
+
+    assert_eq!(dungeons::episode_star(&pool, 25, 1000002).await.unwrap(), 1);
+    assert_eq!(pending_row(&pool, 25).await, None);
+    assert!(end_battleless(&pool, 25, false).await.unwrap().is_none());
+    assert_eq!(currency_4(&pool, 25).await, 94);
+}
+
+#[tokio::test]
+async fn battleless_start_defers_first_clear_reward() {
+    let pool = battleless_pool(26).await;
+
+    begin_battleless(&pool, 26, 102, 10215, 1).await.unwrap();
+    assert_eq!(item_count(&pool, 26, 980025).await, 0);
+    assert_eq!(dungeons::episode_star(&pool, 26, 10215).await.unwrap(), 0);
+
+    end_battleless(&pool, 26, false).await.unwrap().unwrap();
+    assert_eq!(item_count(&pool, 26, 980025).await, 1);
+    assert_eq!(dungeons::episode_star(&pool, 26, 10215).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn battleless_abort_refunds_cost() {
+    let pool = battleless_pool(27).await;
+    begin_battleless(&pool, 27, 10000, 1000002, 1)
+        .await
+        .unwrap();
+    assert_eq!(currency_4(&pool, 27).await, 94);
+
+    match end_battleless(&pool, 27, true).await.unwrap().unwrap() {
+        BattlelessEnd::Refunded(refund) => {
+            assert_eq!(refund.rewards.currency_ids, vec![(4, 6)]);
+        }
+        BattlelessEnd::Completed { .. } => panic!("expected refund"),
+    }
+
+    assert_eq!(currency_4(&pool, 27).await, 100);
+    assert_eq!(dungeons::episode_star(&pool, 27, 1000002).await.unwrap(), 0);
+    assert_eq!(pending_row(&pool, 27).await, None);
+}
+
+#[tokio::test]
+async fn battleless_start_replaces_pending_and_refunds_previous_cost() {
+    let pool = battleless_pool(28).await;
+    begin_battleless(&pool, 28, 10000, 1000002, 1)
+        .await
+        .unwrap();
+    assert_eq!(currency_4(&pool, 28).await, 94);
+
+    match begin_battleless(&pool, 28, 10000, 1000003, 1)
+        .await
+        .unwrap()
+    {
+        BattlelessStart::Started { cost, refund } => {
+            assert_eq!(cost.currency_ids, vec![(4, -6)]);
+            let refund = refund.expect("previous pending cost must be refunded");
+            assert_eq!(refund.currency_ids, vec![(4, 6)]);
+        }
+        BattlelessStart::Resumed => panic!("expected a new battleless start"),
+    }
+
+    assert_eq!(currency_4(&pool, 28).await, 94);
+    assert_eq!(pending_row(&pool, 28).await, Some((10000, 1000003, 1)));
+
+    match end_battleless(&pool, 28, false).await.unwrap().unwrap() {
+        BattlelessEnd::Completed { episode_id, .. } => assert_eq!(episode_id, 1000003),
+        BattlelessEnd::Refunded(_) => panic!("expected completion"),
+    }
+    assert_eq!(dungeons::episode_star(&pool, 28, 1000003).await.unwrap(), 1);
+    assert_eq!(pending_row(&pool, 28).await, None);
 }
 
 #[tokio::test]

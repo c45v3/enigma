@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use common::time::ServerTime;
 use config::configs;
 use sonettobuf::OpenInfo;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use std::collections::{HashMap, HashSet};
 
 pub async fn get_user_dungeons(pool: &SqlitePool, user_id: i64) -> Result<Vec<UserDungeon>> {
@@ -91,6 +91,67 @@ pub async fn episode_star_in_transaction(
     .bind(episode_id)
     .fetch_one(&mut **tx)
     .await?)
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct PendingBattleless {
+    pub user_id: i64,
+    pub chapter_id: i32,
+    pub episode_id: i32,
+    pub multiplier: i32,
+    pub created_at: i64,
+}
+
+pub async fn load_pending_battleless_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: i64,
+) -> Result<Option<PendingBattleless>> {
+    Ok(sqlx::query_as::<_, PendingBattleless>(
+        "SELECT user_id, chapter_id, episode_id, multiplier, created_at
+         FROM user_pending_battleless WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+pub async fn upsert_pending_battleless_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: i64,
+    chapter_id: i32,
+    episode_id: i32,
+    multiplier: i32,
+    created_at: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO user_pending_battleless
+             (user_id, chapter_id, episode_id, multiplier, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+             chapter_id = excluded.chapter_id,
+             episode_id = excluded.episode_id,
+             multiplier = excluded.multiplier,
+             created_at = excluded.created_at",
+    )
+    .bind(user_id)
+    .bind(chapter_id)
+    .bind(episode_id)
+    .bind(multiplier.max(1))
+    .bind(created_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn clear_pending_battleless_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: i64,
+) -> Result<()> {
+    sqlx::query("DELETE FROM user_pending_battleless WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 pub async fn claim_reward_repair_in_transaction(

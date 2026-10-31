@@ -28,9 +28,21 @@ pub struct DungeonSettlement {
     pub tasks: Vec<logic::task::UserTask>,
 }
 
-pub struct BattlelessSettlement {
-    pub cost: ConsumedRewards,
-    pub dungeon: DungeonSettlement,
+pub enum BattlelessStart {
+    Resumed,
+    Started {
+        cost: ConsumedRewards,
+        refund: Option<AppliedRewards>,
+    },
+}
+
+pub enum BattlelessEnd {
+    Completed {
+        chapter_id: i32,
+        episode_id: i32,
+        settlement: DungeonSettlement,
+    },
+    Refunded(RefundSettlement),
 }
 
 pub struct RefundSettlement {
@@ -86,34 +98,117 @@ pub async fn settle_active(
     Ok(settlement)
 }
 
-pub async fn settle_battleless(
+pub async fn begin_battleless(
     db: &SqlitePool,
     player_id: i64,
     chapter_id: i32,
     episode_id: i32,
-    completion: DungeonCompletion<'_>,
-    record: &DungeonRecordStatus,
-) -> Result<BattlelessSettlement, AppError> {
+    multiplier: i32,
+) -> Result<BattlelessStart, AppError> {
     let episode = configs::get()
         .episode
         .get(episode_id)
         .ok_or(AppError::InvalidRequest)?;
-    if episode.battle_id != 0 {
+    if episode.battle_id != 0 || episode.chapter_id != chapter_id {
         return Err(AppError::InvalidRequest);
     }
+    let multiplier = multiplier.max(1);
     let mut tx = db.begin().await?;
+    let pending = dungeons::load_pending_battleless_in_transaction(&mut tx, player_id).await?;
+    if pending.as_ref().is_some_and(|pending| {
+        pending.chapter_id == chapter_id
+            && pending.episode_id == episode_id
+            && pending.multiplier == multiplier
+    }) {
+        return Ok(BattlelessStart::Resumed);
+    }
     if dungeons::episode_star_in_transaction(&mut tx, player_id, episode_id).await? > 0 {
         return Err(AppError::InvalidRequest);
     }
+    let refund = if let Some(pending) = pending {
+        let old_episode = configs::get()
+            .episode
+            .get(pending.episode_id)
+            .ok_or(AppError::InvalidRequest)?;
+        let refund = failure_refund(old_episode, pending.multiplier.max(1));
+        Some(
+            reward::RewardManager::new(player_id)
+                .apply_dungeon_in_transaction(&mut tx, refund)
+                .await?,
+        )
+    } else {
+        None
+    };
     let cost = reward::RewardManager::new(player_id)
-        .consume(&mut tx, &episode_cost(episode, completion.multiplier))
+        .consume(&mut tx, &episode_cost(episode, multiplier))
         .await?;
-    let dungeon = settle_completion_in_transaction(
-        &mut tx, player_id, chapter_id, episode_id, completion, record,
+    dungeons::upsert_pending_battleless_in_transaction(
+        &mut tx,
+        player_id,
+        chapter_id,
+        episode_id,
+        multiplier,
+        ServerTime::now_ms(),
     )
     .await?;
     tx.commit().await?;
-    Ok(BattlelessSettlement { cost, dungeon })
+    Ok(BattlelessStart::Started { cost, refund })
+}
+
+pub async fn end_battleless(
+    db: &SqlitePool,
+    player_id: i64,
+    is_abort: bool,
+) -> Result<Option<BattlelessEnd>, AppError> {
+    let mut tx = db.begin().await?;
+    let Some(pending) =
+        dungeons::load_pending_battleless_in_transaction(&mut tx, player_id).await?
+    else {
+        return Ok(None);
+    };
+    let Some(episode) = configs::get().episode.get(pending.episode_id) else {
+        dungeons::clear_pending_battleless_in_transaction(&mut tx, player_id).await?;
+        tx.commit().await?;
+        return Err(AppError::InvalidRequest);
+    };
+    if episode.battle_id != 0 || episode.chapter_id != pending.chapter_id {
+        dungeons::clear_pending_battleless_in_transaction(&mut tx, player_id).await?;
+        tx.commit().await?;
+        return Err(AppError::InvalidRequest);
+    }
+    if is_abort {
+        let refund = failure_refund(episode, pending.multiplier.max(1));
+        let rewards = reward::RewardManager::new(player_id)
+            .apply_dungeon_in_transaction(&mut tx, refund)
+            .await?;
+        dungeons::clear_pending_battleless_in_transaction(&mut tx, player_id).await?;
+        tx.commit().await?;
+        return Ok(Some(BattlelessEnd::Refunded(RefundSettlement {
+            rewards,
+            compose_push: None,
+        })));
+    }
+    let settlement = settle_completion_in_transaction(
+        &mut tx,
+        player_id,
+        pending.chapter_id,
+        pending.episode_id,
+        DungeonCompletion {
+            star: 1,
+            total_round: 0,
+            multiplier: pending.multiplier.max(1),
+            fight_group: None,
+        },
+        &Default::default(),
+    )
+    .await?;
+    dungeons::clear_pending_battleless_in_transaction(&mut tx, player_id).await?;
+    tx.commit().await?;
+    Ok(Some(BattlelessEnd::Completed {
+        chapter_id: pending.chapter_id,
+        episode_id: pending.episode_id,
+        settlement,
+    }))
 }
 
 pub(crate) async fn settle_completion_in_transaction(

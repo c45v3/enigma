@@ -871,3 +871,172 @@ fn normal_push_uses_the_runtime_outcome() {
         Some(FightResult::Succ as i32)
     );
 }
+
+#[tokio::test]
+async fn battleless_completion_waits_for_end_dungeon() {
+    use crate::{
+        handlers::dungeon::{on_dungeon_end_dungeon, on_start_dungeon},
+        net::{
+            app::AppState, context::ConnectionContext, outbound::CommandPacket,
+            packet::ClientPacket,
+        },
+        player::{Player, PlayerState},
+    };
+    use prost::Message;
+    use sonettobuf::CmdId;
+    use tokio::sync::mpsc;
+
+    let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("data/excel2json");
+    let _ = config::init(data_dir.to_str().unwrap());
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    database::run_migrations(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, created_at, updated_at)
+         VALUES (31, 'battleless-end', 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    database::db::starter_data::load_all_starter_data(&pool, 31)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE currencies SET quantity = 100 WHERE user_id = 31 AND currency_id = 4")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let state = Box::leak(Box::new(AppState::new(pool, configs::get())));
+    let (outbound, mut packets) = mpsc::channel(256);
+    let mut ctx = ConnectionContext::new(outbound, state);
+    ctx.player = Some(Player::new(31, PlayerState::new(31, 0)));
+
+    let mut data = Vec::new();
+    sonettobuf::StartDungeonRequest {
+        chapter_id: Some(10000),
+        episode_id: Some(1000002),
+        fight_group: Some(Default::default()),
+        multiplication: Some(1),
+        ..Default::default()
+    }
+    .encode(&mut data)
+    .unwrap();
+    on_start_dungeon(
+        &mut ctx,
+        ClientPacket {
+            sequence: 0,
+            cmd_id: CmdId::StartDungeonCmd as i16,
+            up_tag: 7,
+            data,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut start_reply = None;
+    while let Ok(packet) = packets.try_recv() {
+        match packet {
+            CommandPacket::Push {
+                cmd_id: CmdId::DungeonEndDungeonPushCmd,
+                ..
+            } => panic!("battleless completion must wait for DungeonEndDungeonCmd"),
+            CommandPacket::Push {
+                cmd_id: CmdId::DungeonUpdatePushCmd,
+                ..
+            } => panic!("battleless progress must wait for DungeonEndDungeonCmd"),
+            CommandPacket::Reply {
+                cmd_id: CmdId::StartDungeonCmd,
+                body,
+                ..
+            } => {
+                start_reply = Some(sonettobuf::StartDungeonReply::decode(&*body).unwrap());
+            }
+            _ => {}
+        }
+    }
+    let start_reply = start_reply.expect("start dungeon reply");
+    assert!(start_reply.fight.is_none());
+    assert!(start_reply.round.is_none());
+
+    let currency: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 31 AND currency_id = 4",
+    )
+    .fetch_one(state.db)
+    .await
+    .unwrap();
+    assert_eq!(currency, 94);
+    let pending: Option<(i32, i32)> = sqlx::query_as(
+        "SELECT chapter_id, episode_id FROM user_pending_battleless WHERE user_id = 31",
+    )
+    .fetch_optional(state.db)
+    .await
+    .unwrap();
+    assert_eq!(pending, Some((10000, 1000002)));
+    assert_eq!(
+        dungeons::episode_star(state.db, 31, 1000002).await.unwrap(),
+        0
+    );
+
+    let mut data = Vec::new();
+    sonettobuf::EndDungeonRequest {
+        is_abort: Some(false),
+        end_type: None,
+    }
+    .encode(&mut data)
+    .unwrap();
+    on_dungeon_end_dungeon(
+        &mut ctx,
+        ClientPacket {
+            sequence: 1,
+            cmd_id: CmdId::DungeonEndDungeonCmd as i16,
+            up_tag: 8,
+            data,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut end_push = false;
+    let mut update_push = false;
+    let mut end_reply = false;
+    while let Ok(packet) = packets.try_recv() {
+        match packet {
+            CommandPacket::Push {
+                cmd_id: CmdId::DungeonEndDungeonPushCmd,
+                ..
+            } => end_push = true,
+            CommandPacket::Push {
+                cmd_id: CmdId::DungeonUpdatePushCmd,
+                ..
+            } => update_push = true,
+            CommandPacket::Reply {
+                cmd_id: CmdId::DungeonEndDungeonCmd,
+                ..
+            } => end_reply = true,
+            _ => {}
+        }
+    }
+    assert!(end_push);
+    assert!(update_push);
+    assert!(end_reply);
+    assert_eq!(
+        dungeons::episode_star(state.db, 31, 1000002).await.unwrap(),
+        1
+    );
+    let pending: Option<(i32, i32)> = sqlx::query_as(
+        "SELECT chapter_id, episode_id FROM user_pending_battleless WHERE user_id = 31",
+    )
+    .fetch_optional(state.db)
+    .await
+    .unwrap();
+    assert_eq!(pending, None);
+    let currency: i32 = sqlx::query_scalar(
+        "SELECT quantity FROM currencies WHERE user_id = 31 AND currency_id = 4",
+    )
+    .fetch_one(state.db)
+    .await
+    .unwrap();
+    assert_eq!(currency, 94);
+}

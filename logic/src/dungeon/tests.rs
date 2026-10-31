@@ -410,7 +410,7 @@ fn permanent_clears_use_their_guaranteed_reward_source() {
 }
 
 #[tokio::test]
-async fn logic_compensate_fairytale_clears_awards_rewards_and_is_idempotent() {
+async fn logic_compensate_fairytale_clears_syncs_progress_without_rewards() {
     let pool = test_pool(41).await;
     database::db::starter_data::load_all_starter_data(&pool, 41)
         .await
@@ -433,10 +433,16 @@ async fn logic_compensate_fairytale_clears_awards_rewards_and_is_idempotent() {
     .fetch_one(&pool)
     .await
     .unwrap();
+    let item_before: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(quantity), 0) FROM items WHERE user_id = 41 AND item_id = 110202",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     let manager = DungeonManager::new(41);
     let compensation = manager.compensate_fairytale_clears(&pool).await.unwrap();
-    assert_eq!(compensation.compensated_episodes, vec![403]);
+    assert_eq!(compensation, vec![403]);
 
     let ft_star = dungeons::episode_star(&pool, 41, 403).await.unwrap();
     assert_eq!(ft_star, 2);
@@ -447,11 +453,18 @@ async fn logic_compensate_fairytale_clears_awards_rewards_and_is_idempotent() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(currency_after, currency_before + 20);
+    assert_eq!(currency_after, currency_before);
+    let item_after: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(quantity), 0) FROM items WHERE user_id = 41 AND item_id = 110202",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(item_after, item_before);
 
     // Idempotent rerun
     let compensation2 = manager.compensate_fairytale_clears(&pool).await.unwrap();
-    assert!(compensation2.compensated_episodes.is_empty());
+    assert!(compensation2.is_empty());
     let currency_after2: i32 = sqlx::query_scalar(
         "SELECT quantity FROM currencies WHERE user_id = 41 AND currency_id = 2",
     )

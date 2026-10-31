@@ -275,7 +275,7 @@ async fn story_first_clear_when_fairytale_already_cleared_does_not_duplicate_fai
 }
 
 #[tokio::test]
-async fn historical_compensation_clears_fairytale_and_is_idempotent() {
+async fn historical_compensation_syncs_fairytale_without_rewards() {
     let pool = test_pool(104).await;
 
     // Simulate an existing player who cleared story 10403 in the past without fairytale 403
@@ -308,39 +308,31 @@ async fn historical_compensation_clears_fairytale_and_is_idempotent() {
     // Run historical compensation
     let compensation = info::compensate_fairytale_clears(&pool, 104).await.unwrap();
 
-    assert_eq!(compensation.compensated_episodes, vec![403]);
-    assert_eq!(compensation.dungeon_updates.len(), 1);
-    assert_eq!(
-        compensation.dungeon_updates[0]
-            .dungeon_info
-            .as_ref()
-            .and_then(|d| d.episode_id),
-        Some(403)
-    );
+    assert_eq!(compensation, vec![403]);
 
     // Database should now have fairytale 403 cleared
     assert_eq!(dungeons::episode_star(&pool, 104, 403).await.unwrap(), 2);
 
-    // Rewards from fairytale first bonus must be granted
+    // Historical compensation only syncs completion state
     let currency_after: i32 = sqlx::query_scalar(
         "SELECT quantity FROM currencies WHERE user_id = 104 AND currency_id = 2",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(currency_after, currency_before + 20);
+    assert_eq!(currency_after, currency_before);
 
-    let item_after: i32 =
-        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 104 AND item_id = 110202")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(item_after, item_before + 3);
+    let item_after: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(quantity), 0) FROM items WHERE user_id = 104 AND item_id = 110202",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(item_after, item_before);
 
     // Second run must be completely idempotent
     let compensation2 = info::compensate_fairytale_clears(&pool, 104).await.unwrap();
-    assert!(compensation2.compensated_episodes.is_empty());
-    assert!(compensation2.dungeon_updates.is_empty());
+    assert!(compensation2.is_empty());
 
     let currency_after2: i32 = sqlx::query_scalar(
         "SELECT quantity FROM currencies WHERE user_id = 104 AND currency_id = 2",
@@ -350,11 +342,12 @@ async fn historical_compensation_clears_fairytale_and_is_idempotent() {
     .unwrap();
     assert_eq!(currency_after2, currency_after);
 
-    let item_after2: i32 =
-        sqlx::query_scalar("SELECT quantity FROM items WHERE user_id = 104 AND item_id = 110202")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let item_after2: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(quantity), 0) FROM items WHERE user_id = 104 AND item_id = 110202",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(item_after2, item_after);
 }
 
