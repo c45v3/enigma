@@ -150,6 +150,80 @@ fn emitter_career_marks_the_resolved_hit() {
         })
     ));
 }
+#[test]
+fn ultimate_might_converts_incantation_might_with_attribute_232() {
+    init_config();
+    let fight = Fight {
+        attacker: Some(FightTeam {
+            entitys: vec![entity(10, 1, 1, 1_000, 0)],
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![entity(-1, 2, 1, 0, 0)],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let pool = TargetPool::from_fight(&fight);
+    let managers = BattleManagers::seeded(&fight);
+    let origin = CommandOrigin {
+        domain: crate::engine::skill::rule::RuleDomain::Skill,
+        key: crate::engine::skill::rule::DefinitionKey::new(30230134, "SkillDamage"),
+    };
+
+    for (attack_attributes, expected) in [
+        (vec![(AttrId::IncantationMight, 200)], 1_000),
+        (
+            vec![
+                (AttrId::IncantationMight, 200),
+                (AttrId::UltimateIncantationMightMultiplier, 1_200),
+            ],
+            1_240,
+        ),
+    ] {
+        let command = resolve_attack_command(
+            &AttackPlan {
+                source_uid: 10,
+                target_uid: -1,
+                skill_id: 30230134,
+                rate: 1_000,
+                rate_terms: Vec::new(),
+                attack_attributes,
+                career_ratio_bonus: 0,
+                attack_career: None,
+                additional_attack_career: None,
+                force_career_restraint: false,
+                critical_multiplier_remainder: 0,
+                is_conduit: false,
+                is_crit: false,
+                assassinate: false,
+                main_target: true,
+                extra_skill_kind: 0,
+                performs_extra_action: false,
+                additional_enabled: false,
+                additional_is_crit: None,
+            },
+            DamageRuntime {
+                fight_version: 7,
+                pool: &pool,
+                attributes: &managers.attribute,
+                buffs: &managers.buff,
+                target_buffs: &managers.buff,
+                hp: &managers.hp,
+                fields: None,
+                emitter: None,
+                team_inspiration: 0,
+            },
+            origin,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            command,
+            HpCommand::Damage(HpDamage { amount, .. }) if amount == expected
+        ));
+    }
+}
 
 #[test]
 fn skill_might_uses_classification_and_cross_attributes() {

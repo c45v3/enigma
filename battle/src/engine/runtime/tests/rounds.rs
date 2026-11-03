@@ -475,6 +475,43 @@ fn opening_round_uses_action_point_buffs_applied_during_setup() {
 }
 
 #[test]
+fn hero_3147_passive_starts_without_invalid_skill_definition() {
+    crate::test_support::init_config();
+    let fight = Fight {
+        cur_round: Some(1),
+        version: Some(7),
+        attacker: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(10),
+                model_id: Some(3147),
+                team_type: Some(1),
+                position: Some(1),
+                current_hp: Some(10_000),
+                passive_skill: vec![31475152],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        defender: Some(FightTeam {
+            entitys: vec![FightEntityInfo {
+                uid: Some(-1),
+                team_type: Some(2),
+                position: Some(1),
+                current_hp: Some(10_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut runtime = runtime(fight);
+
+    let round = runtime.start_round().unwrap();
+
+    assert_eq!(round.cur_round, Some(1));
+}
+
+#[test]
 fn twins_full_harmonization_switches_to_the_special_conduit_group() {
     crate::test_support::init_config();
     let fight = Fight {
