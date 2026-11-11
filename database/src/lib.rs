@@ -88,8 +88,13 @@ pub async fn migrate_or_rescue(settings: &DatabaseSettings) -> anyhow::Result<Sq
         return Err(discard_staging_on_error(error, &staging_path));
     }
 
-    let backed_up =
-        std::fs::copy(db_path, &bak_path).and_then(|_| std::fs::File::open(&bak_path)?.sync_all());
+    let backed_up = std::fs::copy(db_path, &bak_path).and_then(|_| {
+        // Windows FlushFileBuffers requires a handle opened with write access.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bak_path)?
+            .sync_all()
+    });
     if let Err(e) = backed_up {
         return Err(discard_staging_on_error(
             anyhow::anyhow!("Failed to back up DB to {bak_path}: {e}"),
