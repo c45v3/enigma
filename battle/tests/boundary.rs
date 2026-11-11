@@ -11,6 +11,7 @@ fn battle_crates_keep_their_dependency_boundary() {
         &workspace.join("battle/Cargo.toml"),
         &[
             "anyhow",
+            "common",
             "config",
             "protocol",
             "rand",
