@@ -411,9 +411,7 @@ fn slot_node(db: &config::GameDB, raw: RawSlot, skill_observed: bool) -> Option<
     };
     let semantic = match (parsed.as_ref(), definition) {
         (_, None) => "route missing",
-        (Some(parsed), Some(definition)) if definition.supports.is_none() => {
-            "unvalidated arguments"
-        }
+        (Some(_), Some(definition)) if definition.supports.is_none() => "unvalidated arguments",
         (Some(parsed), Some(definition))
             if !definition.supports.is_some_and(|supports| supports(parsed)) =>
         {

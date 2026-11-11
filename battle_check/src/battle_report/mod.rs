@@ -330,6 +330,16 @@ mod tests {
         std::os::unix::fs::symlink(source, destination)
     }
 
+    #[cfg(windows)]
+    fn unlink_directory(path: &Path) -> std::io::Result<()> {
+        fs::remove_dir(path)
+    }
+
+    #[cfg(unix)]
+    fn unlink_directory(path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+
     fn temporary(name: &str) -> PathBuf {
         env::temp_dir().join(format!(
             "enigma-battle-report-{name}-{}",
@@ -380,7 +390,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         if link_directory(&outside, &output).is_ok() {
             assert!(absolute_output(&output).is_err());
-            fs::remove_dir(&output).unwrap();
+            unlink_directory(&output).unwrap();
         }
         cleanup_owned_directory(&outside).unwrap();
     }
@@ -394,7 +404,7 @@ mod tests {
             let output = link.join("must-not-exist").join("report");
             assert!(absolute_output(&output).is_err());
             assert!(!outside.join("must-not-exist").exists());
-            fs::remove_dir(&link).unwrap();
+            unlink_directory(&link).unwrap();
         }
         cleanup_owned_directory(&outside).unwrap();
     }

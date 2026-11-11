@@ -470,6 +470,16 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn unlink_directory(path: &Path) -> std::io::Result<()> {
+        fs::remove_dir(path)
+    }
+
+    #[cfg(unix)]
+    fn unlink_directory(path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    #[cfg(windows)]
     fn link_file(source: &Path, destination: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_file(source, destination)
     }
@@ -595,7 +605,7 @@ mod tests {
         let link = root.join("escape");
         if link_directory(&outside, &link).is_ok() {
             assert!(capture_json_files(&root).is_empty());
-            fs::remove_dir(&link).unwrap();
+            unlink_directory(&link).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
@@ -642,7 +652,7 @@ mod tests {
         let link = root.join("decoded");
         if link_directory(&outside, &link).is_ok() {
             assert!(capture_json_files(&root).is_empty());
-            fs::remove_dir(&link).unwrap();
+            unlink_directory(&link).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
