@@ -31,12 +31,14 @@ impl BehaviorHandler for Handler {
             (behavior.spec.kind, behavior.args.as_slice())
             && let Some(career) = normalized_career(*career)
         {
-            return Some(vec![RuleOp::Command(BattleCommand::Entity(EntityCommand {
-                origin: super::command_origin(behavior).expect("registered behavior"),
-                source_uid: context.source_uid,
-                target_uid: context.target_uid,
-                operation: EntityOperation::ChangeCareer { career },
-            }))]);
+            return Some(vec![RuleOp::Command(BattleCommand::Entity(
+                EntityCommand {
+                    origin: super::command_origin(behavior).expect("registered behavior"),
+                    source_uid: context.source_uid,
+                    target_uid: context.target_uid,
+                    operation: EntityOperation::ChangeCareer { career },
+                },
+            ))]);
         }
         apply(context.modifiers, behavior).then(Vec::new)
     }
