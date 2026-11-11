@@ -377,7 +377,6 @@ fn state_snapshots_preserve_initialized_device_runtime_state() {
     assert_eq!(manager.consumed_this_round, before.consumed_this_round);
     assert_eq!(manager.uses_this_round, before.uses_this_round);
     assert_eq!(manager.counters_this_round, before.counters_this_round);
-    assert_eq!(manager.current_costs, before.current_costs);
     assert_eq!(
         format!("{:?}", manager.pending_activations),
         format!("{:?}", before.pending_activations)

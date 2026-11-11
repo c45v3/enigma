@@ -186,6 +186,7 @@ pub async fn end_battleless(
         return Ok(Some(BattlelessEnd::Refunded(RefundSettlement {
             rewards,
             compose_push: None,
+            tasks: Vec::new(),
         })));
     }
     let settlement = settle_completion_in_transaction(
