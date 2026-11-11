@@ -9,6 +9,7 @@ use crate::engine::{
     manager::{
         BattleManagers,
         conduit::{ConduitChange, ConduitDevice, ConduitSkill},
+        ex_point::ExPointKind,
     },
     mechanic::card::CardMechanic,
     runtime::{determinism::RoundDeterminism, executor::RuleOutcome, schedule::run_conduit_phase},
@@ -16,7 +17,7 @@ use crate::engine::{
         behavior::classify::BehaviorKind,
         condition::parse::ParsedConditionKind,
         effect::{SkillEffectCatalog, catalog::SkillEffectTag},
-        target::TargetPool,
+        target::{TargetEntity, TargetPool},
     },
 };
 
@@ -162,11 +163,13 @@ pub(super) struct Selection {
 pub(super) fn operations(
     simulation: &Simulation<'_>,
     opers: &[BeginRoundOper],
+    preserve_played_selection: bool,
 ) -> Result<Option<Selection>, AutoBattleError> {
     let devices = simulation
         .managers
         .conduit
         .devices()
+        .filter(|device| simulation.managers.entity.team_type(device.uid) == Some(1))
         .cloned()
         .collect::<Vec<_>>();
     let mut operations = devices
@@ -273,6 +276,15 @@ pub(super) fn operations(
             .collect::<Vec<_>>();
         let mut next = operations.clone();
         for (device_index, device) in devices.iter().enumerate() {
+            let current_group = device.selected_group;
+            let current_priority = candidates
+                .iter()
+                .find(|(candidate_index, _, group, _)| {
+                    *candidate_index == device_index && *group == current_group
+                })
+                .and_then(|(_, _, _, score)| score.as_ref())
+                .map(|score| (score.0, score.1))
+                .unwrap_or((0, 0));
             let mut best = None;
             for (_, index, requested_group, candidate) in candidates
                 .iter()
@@ -281,12 +293,18 @@ pub(super) fn operations(
                 let Some(candidate) = candidate else {
                     continue;
                 };
+                if preserve_played_selection
+                    && *requested_group != current_group
+                    && (candidate.0, candidate.1) <= current_priority
+                {
+                    continue;
+                }
                 let key = (*candidate, Reverse(*index));
                 if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
                     best = Some((key, *requested_group));
                 }
             }
-            next[device_index].index = Some(best.map_or(device.selected_group, |(_, group)| group));
+            next[device_index].index = Some(best.map_or(current_group, |(_, group)| group));
         }
         if next == operations {
             break;
@@ -303,6 +321,7 @@ pub(super) fn operations(
             .conduit
             .selections()
             .into_iter()
+            .filter(|(uid, _)| after_cards.entity.team_type(*uid) == Some(1))
             .map(|(uid, group)| FightDeviceOper {
                 uid: Some(uid),
                 index: Some(group),
@@ -450,14 +469,16 @@ fn score_group(
 ) -> Option<GroupScore> {
     let pre_pool = simulation.pool.runtime_view(&simulated.before);
     let source = pre_pool.entity(candidate.source_uid)?;
-    if simulated
+    let selected = simulated
         .before
         .conduit
         .selected_skills(candidate.source_uid)
-        .ok()?
+        .ok()?;
+    if selected
         .iter()
         .any(|skill| simulated.catalog.is_big_skill(skill.skill_id))
-        && !CardMechanic.ultimate_resource_ready(&simulated.before, source)
+        && (!CardMechanic.ultimate_resource_ready(&simulated.before, source)
+            || device_unique_is_blocked(&simulated.before, source))
     {
         return None;
     }
@@ -482,6 +503,29 @@ fn score_group(
         (total.0 + score.0, total.1 + score.1, total.2 + score.2)
     });
     (score != (0, 0, 0)).then_some(score)
+}
+
+fn device_unique_is_blocked(managers: &BattleManagers, source: &TargetEntity) -> bool {
+    if !device_power_owner(managers, source) {
+        return false;
+    }
+    !managers.ex_point.is_full(source.uid)
+}
+
+fn device_power_owner(managers: &BattleManagers, source: &TargetEntity) -> bool {
+    let kind = ExPointKind::from_wire(managers.ex_point.kind(source.uid));
+    if kind == ExPointKind::DevicePower {
+        return true;
+    }
+    if kind != ExPointKind::Common || source.ex_skill > 0 || source.model_id <= 0 {
+        return false;
+    }
+    let game = managers.catalog().game_data();
+    let rank =
+        crate::engine::entity::stats::configured_rank(game, source.model_id, source.level.max(1));
+    crate::catalog::configured_unique_skill_point(game, source.model_id, rank)
+        .and_then(|spec| crate::engine::manager::ex_point::parse_unique_skill_point(spec).ok())
+        .is_some_and(|(kind, _)| kind == ExPointKind::DevicePower)
 }
 
 fn executed_skills(

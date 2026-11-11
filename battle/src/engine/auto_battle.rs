@@ -185,7 +185,12 @@ pub(crate) fn plan(
         &commands,
         &devices_opers,
     )?;
-    let Some(planned_devices) = conduit::operations(&simulation, &potential)? else {
+    let Some(planned_devices) = conduit::operations(
+        &simulation,
+        &potential,
+        round_state.cur_round >= crate::engine::round::state::FIRST_ACTION_ROUND,
+    )?
+    else {
         return Ok(reply(request, Vec::new(), devices_opers));
     };
     conduit_plan.set_planned(&planned_devices.requested);
